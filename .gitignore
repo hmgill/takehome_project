@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------------------
+# Data protection: nothing derived from the dataset is committed.
+# The NPZ is a stand-in for private data. Users supply their own copy and
+# point to it with PNEUMONIAMNIST_NPZ (see README).
+# ---------------------------------------------------------------------------
+*.npz
+*.npy
+*.duckdb
+*.sqlite3*
+*.joblib
+*.pkl
+*.zip
+data%2E
+
+# Everything under data/ and output/ is generated from the dataset
+# (metadata CSVs with per-image hashes, image thumbnails, QC figures showing
+# real images, fitted models whose scaler stores the mean training image,
+# and logs/provenance containing local machine paths).
+data/*
+!data/.gitkeep
+output/*
+!output/.gitkeep
+
+# Local environment / secrets
+.env
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Editor scratch files
+untitled*.py

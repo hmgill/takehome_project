@@ -1,0 +1,19 @@
+# Allowlist: ignore everything, then add back only source code.
+# This keeps the dataset, any stray copies of it, generated databases,
+# models, logs and local secrets out of the build context entirely.
+*
+
+!app.py
+!config.toml
+!requirements.txt
+!README.md
+!CONFIG_AND_OUTPUTS.md
+!.streamlit/
+!src/
+!sql/
+!tests/
+!tools/
+
+# Never ship caches even inside allowed folders
+**/__pycache__
+**/*.py[cod]

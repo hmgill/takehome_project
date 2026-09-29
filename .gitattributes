@@ -1,0 +1,4 @@
+# Keep line endings consistent between Windows checkouts and Linux containers
+* text=auto eol=lf
+*.png binary
+*.jpg binary

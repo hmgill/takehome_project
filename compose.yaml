@@ -1,0 +1,33 @@
+# Usage (PowerShell):
+#   $env:NPZ_PATH = "C:\Users\you\datasets\pneumoniamnist.npz"
+#   docker compose up --build
+# Or put NPZ_PATH=... in a local .env file (git-ignored).
+# Results are written to ./output on your machine (override with OUTPUT_DIR).
+
+services:
+  explorer:
+    build: .
+    image: pneumoniamnist-explorer:latest
+    ports:
+      - "8501:8501"
+    environment:
+      PNEUMONIAMNIST_NPZ: /input/pneumoniamnist.npz
+      # Shows the "Import NPZ dataset" / local folder buttons in the sidebar.
+      # They only see the container's filesystem.
+      IMAGE_EXPLORER_LOCAL_IMPORT: "1"
+    volumes:
+      - type: bind
+        source: ${NPZ_PATH:?Set NPZ_PATH to the full path of your pneumoniamnist.npz}
+        target: /input/pneumoniamnist.npz
+        read_only: true
+      - explorer-data:/app/data
+      # Outputs (QC tables, figures, model metrics, logs) appear in a normal
+      # folder on your machine. Defaults to ./output next to this file; set
+      # OUTPUT_DIR to use another location. This folder is git-ignored and
+      # excluded from the Docker build, so nothing here gets shared.
+      - type: bind
+        source: ${OUTPUT_DIR:-./output}
+        target: /app/output
+
+volumes:
+  explorer-data:

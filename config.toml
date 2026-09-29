@@ -1,0 +1,57 @@
+[project]
+name = "pneumoniamnist-takehome"
+random_seed = 42
+threads = 1
+
+[paths]
+data_dir = "data"
+output_dir = "output"
+dataset = "data/pneumoniamnist.npz"
+database = "data/pneumoniamnist.duckdb"
+metadata_csv = "data/pneumoniamnist_metadata.csv"
+analysis_sql = "sql/analysis.sql"
+
+[outputs]
+logs = "output/logs"
+analysis = "output/analysis"
+models = "output/models"
+predictions = "output/predictions"
+model_selection = "output/model_selection"
+shap = "output/shap"
+mlflow = "output/mlflow"
+temp = "output/tmp"
+
+[qc]
+expected_height = 28
+expected_width = 28
+low_variance_quantile = 0.01
+
+[modeling]
+cv_folds = 3
+search_iterations = 8
+threshold_method = "youden_j"
+
+[mlflow]
+baseline_experiment = "pneumoniamnist"
+experiments_experiment = "pneumoniamnist_experiments"
+
+[shap]
+background_size = 100
+default_output_format = "png"
+
+[augmentation]
+enabled = false
+copies_per_image = 1
+rotate_limit_degrees = 5.0
+translate_limit_fraction = 0.03
+scale_limit_fraction = 0.03
+brightness_limit = 0.05
+contrast_limit = 0.05
+probability = 0.5
+
+[theme]
+base = "light"
+primaryColor = "#2563eb"
+backgroundColor = "#f7f8fa"
+secondaryBackgroundColor = "#eef1f5"
+textColor = "#1e293b"
