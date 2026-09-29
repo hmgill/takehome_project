@@ -1,84 +1,52 @@
-# Image Explorer — PneumoniaMNIST pipeline
+# Image Explorer: PneumoniaMNIST pipeline
 
-A small local application that discovers or accepts images, validates and processes them, extracts metadata, applies a trained classifier, persists structured results, and exposes them through **Streamlit**.
+A local application that ingests images, validates them, extracts metadata, classifies them with a trained baseline, stores the results in a structured catalog, and lets you explore everything in a **Streamlit** app with per-pixel SHAP explanations.
 
-The main application uses Streamlit widgets and native charts. Plotly is not required for the application. The original optional SHAP HTML exporter is retained for compatibility in the experiment dependencies; PNG remains its default.
+> This is an exploratory engineering demo, not a clinical tool.
 
-## Quick start (Python 3.12)
+**Contents:** [Walkthrough video](#walkthrough-video) · [Quick start](#quick-start) · [Data handling](#data-handling) · [Pipeline](#pipeline) · [Using the app](#using-the-app) · [Configuration](#configuration) · [Design](#design) · [Limitations](#limitations) · [Research and data-engineering notes](#research-and-data-engineering-notes) · [Publishing the image](#publishing-the-image) · [Project layout](#project-layout) · [Testing](#testing)
 
-Run commands from the project directory. Use a virtual environment:
+---
 
-```bash
-python -m venv .venv
-# macOS/Linux:
-source .venv/bin/activate
-# Windows PowerShell instead:
-# .venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-```
+## Walkthrough video
 
-`requirements.txt` is the single, pinned dependency file for the application, optional experiments (MLflow, XGBoost, SHAP, Albumentations) and tests.
+<!-- TODO: add the walkthrough video. -->
+*Coming soon.* A short walkthrough of the pipeline, the Docker setup and the Streamlit app will be linked here.
 
-### Providing the dataset
+---
 
-**The dataset is never included in this repository or in the Docker image.** PneumoniaMNIST is public, but here it stands in for private data, so every data file and every artifact derived from it (DuckDB/SQLite databases, metadata CSVs, QC figures, fitted models, logs) is excluded by `.gitignore` and `.dockerignore`.
+## Quick start
 
-Download the **28×28 PneumoniaMNIST** archive from the [official MedMNIST project](https://medmnist.com/) and keep it anywhere outside the project. Point the pipeline at it with an environment variable:
+The dataset is **not** included. Download the 28×28 PneumoniaMNIST archive (`pneumoniamnist.npz`) from the [MedMNIST project](https://medmnist.com/) and keep it anywhere outside this folder. See [Data handling](#data-handling) for why.
 
-```bash
-# macOS/Linux
-export PNEUMONIAMNIST_NPZ=/path/to/pneumoniamnist.npz
-# Windows PowerShell
-$env:PNEUMONIAMNIST_NPZ = "C:\path\to\pneumoniamnist.npz"
-```
+### Option A: Docker (recommended)
 
-`PNEUMONIAMNIST_NPZ` overrides `[paths].dataset` in `config.toml` for every script. Each script also still accepts an explicit `--dataset`/`--input`/`--npz` flag. Do not substitute another resolution without updating the model contract.
+Requires Docker Desktop (or Docker Engine with Compose).
 
-### Steps 1–3: existing research workflow
+**1. Build the image and run the tests.** The tests use synthetic images and need no dataset.
 
 ```bash
-# 1. Validate the NPZ, derive metadata, and build the research DuckDB database.
-python src/build_database.py
-
-# 2. Produce SQL-based dataset analysis and QC outputs.
-python src/analyze.py
-
-# 3. Fit the logistic-regression baseline; select threshold on validation,
-#    then write test metrics and the fitted model.
-python src/model.py
-```
-
-### Process images and launch the application
-
-```bash
-# Import all three NPZ splits and classify their images with the trained baseline.
-python src/image_pipeline.py --npz "$PNEUMONIAMNIST_NPZ"
-
-# Or recursively ingest an ordinary image directory (including audit failures).
-python src/image_pipeline.py --directory /path/to/images
-
-# Launch the interactive explorer.
-python -m streamlit run app.py
-```
-
-To inspect uploads before training, launch the app directly, or use `--metadata-only` on the ingestion CLI. These images have status `awaiting_model`, not invented predictions. Once training finishes, repeat ingestion to classify cached features without extracting metadata again. Use `--retry-failed` to retry failed decoding or inference; modified files are detected automatically.
-
-The UI includes upload processing, paginated thumbnails, filename/path search, class/status/format/split filters, width and height limits, file-size limits, score thresholds, sorting, duplicate-only views, class/status distributions, image details, EXIF, and CSV export. Unclassified images remain visible by default and can be excluded. The minimum score refers to the assigned class, not necessarily pneumonia.
-
-Server-side directory and configured-NPZ buttons are hidden by default. For trusted local use, set `IMAGE_EXPLORER_LOCAL_IMPORT=1` before launch. `IMAGE_CATALOG_DB` selects another catalog for the app; the CLI equivalent is `--database`. Never put the catalog inside the input directory, which deliberately audits every discovered file.
-
-## Running with Docker
-
-The image contains code and dependencies only. The NPZ is bind-mounted read-only at run time, and generated databases/models live in named volumes, so no data is baked into the image.
-
-```powershell
 docker build -t pneumoniamnist-explorer .
-
-# Tests use synthetic data and need no dataset
 docker run --rm pneumoniamnist-explorer python -m pytest -q
+```
 
-# Full workflow with Compose
-$env:NPZ_PATH = "C:\path\to\pneumoniamnist.npz"
+**2. Tell Compose where the NPZ is.** Create a `.env` file next to `compose.yaml` (it is git-ignored):
+
+```
+NPZ_PATH=C:\path\to\pneumoniamnist.npz
+```
+
+Or set it for the current shell instead:
+
+| Shell | Command |
+|---|---|
+| Command Prompt | `set "NPZ_PATH=C:\path\to\pneumoniamnist.npz"` |
+| PowerShell | `$env:NPZ_PATH = "C:\path\to\pneumoniamnist.npz"` |
+| macOS/Linux | `export NPZ_PATH=/path/to/pneumoniamnist.npz` |
+
+**3. Run the pipeline and start the app.**
+
+```bash
 docker compose run --rm explorer python src/build_database.py
 docker compose run --rm explorer python src/analyze.py
 docker compose run --rm explorer python src/model.py
@@ -86,134 +54,301 @@ docker compose run --rm explorer python src/image_pipeline.py --npz /input/pneum
 docker compose up
 ```
 
-Then open <http://localhost:8501>. `docker compose down -v` removes the generated volumes.
+**4. Open the app** at <http://localhost:8501>.
 
-Before pushing, run `python tools/check_no_private_data.py --git` to confirm nothing data-derived is tracked.
+Results (QC tables, figures, model metrics, logs) are written to `./output` on your machine. The catalog databases live in a Docker volume. `docker compose down -v` removes that volume; delete `./output` yourself when you are finished.
 
-## Design and requirement coverage
+> **Host vs container paths.** `NPZ_PATH` is a path on your machine. Anything passed to a script runs *inside* the container, which only sees the mounted copy at `/input/pneumoniamnist.npz`. A path like `D:\...` will not be found there.
 
-| Requirement | Implementation |
-|---|---|
-| Recursive discovery and upload | `src/image_pipeline.py` shared by CLI and `app.py`; uploads never become filesystem paths |
-| Supported types | PNG, JPEG, BMP, single-frame TIFF, WebP; case-insensitive extensions and decoded-format matching |
-| Validation | Pillow verify **and** full decode; corrupt files, unexpected extensions, format mismatches and multiframe files recorded separately; limits of 25 MiB and 25 million pixels |
-| Metadata | SHA-256 content ID, source filename/path, encoded byte size, decoded format, orientation-adjusted dimensions/aspect ratio, original color mode, megapixels, EXIF JSON, UTC time, status, error, attempts and pipeline version |
-| Processing | EXIF orientation correction, RGB thumbnail, grayscale 28×28 bilinear resize and float32 pixel features |
-| Classification | Existing trained StandardScaler + logistic regression; validation-derived threshold; class score, pneumonia score and model fingerprint |
-| Structured storage | SQLite application catalog with indexed, related content and source tables; existing research DuckDB/CSV outputs retained |
-| Exploration | Streamlit filters, thumbnails, details, metrics, native charts, uploads and CSV export |
-| Incremental processing | Content-addressed metadata/features, idempotent source upserts, explicit failure retries and model-version-aware inference |
+### Option B: Published image from Docker Hub
 
-`images` has one row per SHA-256 of encoded file bytes; `sources` has one row per source path or upload identity. Identical bytes at two paths retain two source records but share processing. Same-name uploads with different contents are distinct. Repeat uploads with identical name and bytes are idempotent. A modified filesystem path points to its latest content; unreferenced historical content remains in `images`. No automatic deletion or historical attempt ledger is implemented.
+The image is published as [`hmgill/pneumoniamnist-explorer`](https://hub.docker.com/r/hmgill/pneumoniamnist-explorer). Like a local build, it contains code and dependencies only, with no dataset and no trained model. It still needs your own NPZ.
 
-Failed reads have source records without a hash. Files that decode unsuccessfully have a hashed content record with the exception and extraction attempt count. Extension rejection belongs to the source, so a wrongly named copy cannot invalidate a correctly named copy. Statuses are `complete`, `awaiting_model`, `failed`, `model_error`, and `unsupported`. Successful metadata is reused after a classifier failure. SQLite writes each content/source update atomically and uses WAL with a busy timeout for local concurrent sessions.
+**With a clone of this repo**, add the image name to `.env` alongside `NPZ_PATH`:
 
-Exact duplication means identical **encoded bytes**, not perceptual similarity. Different encodings of the same image will be separate catalog contents. The original NPZ QC separately hashes decoded arrays to identify exact pixel duplicates across splits. NPZ import creates deterministic PNG representations; their format/size describe those generated PNGs, **not original hospital files**. Original filenames, acquisition details and EXIF cannot be recovered from the NPZ. Labels and splits stay on source records and never feed inference.
-
-SQLite suits small incremental writes and is included with Python. DuckDB remains the analytical store for the original assessment, avoiding changes to its SQL schema. The Streamlit app reads SQLite only; importing the NPZ is the explicit bridge between the two workflows. Thumbnails and inference features are stored as BLOBs; original uploads are not retained. Detail views show a thumbnail, not a full-resolution diagnostic image.
-
-## Model architecture, tradeoffs and limitations
-
-The default is a **custom linear baseline**, not a pretrained neural network. It standardizes each of 784 grayscale pixels using training statistics, then learns a binary logistic-regression decision boundary. The validation split chooses a Youden-J threshold; test data is reserved for evaluation. The persisted scaler is reused for inference, with raw pixel values on the same 0–255 scale as training. Predictions identify the model and threshold files by a combined SHA-256 fingerprint; changing either refreshes inference on subsequent ingestion.
-
-This is cheap to train and run on CPU, easy to reproduce and straightforward to explain. Flattened pixels discard explicit spatial structure and are sensitive to acquisition, crop, orientation and intensity differences. Resizing arbitrary uploads does not make them in-domain. The model has no modality detector or out-of-distribution rejection: a photograph can receive a chest-X-ray label. This is an exploratory engineering demo, not a clinical tool. Confidence is the uncalibrated score of the threshold-selected class; with a non-0.5 threshold, that score can be below 0.5. It is not a validated probability of disease.
-
-A missing model produces an explicit pending state. An incompatible model or absent/invalid threshold surfaces an error. Only load trusted locally generated joblib files (joblib uses pickle); users cannot upload model artifacts through the app. EXIF can contain sensitive information: the local details panel exposes it, while the default CSV omits EXIF and source paths. A hosted multi-user product would need authentication, isolation and retention controls.
-
-## Research/data engineering judgment (Part 4)
-
-**Data leakage.** Worry about the same patient, repeated studies, adjacent slices, exact/near duplicates, or augmented derivatives crossing splits; preprocessing fitted before splitting; site/device/text markers correlated with labels; label-derived features; temporal leakage; and tuning repeatedly against test results. The NPZ permits pixel-hash overlap and label-conflict checks, but lacks patient/study identifiers, acquisition dates, hospital/device provenance and original headers. It cannot rule these risks out. Split by patient/study (and evaluate site/time holdouts where appropriate), fit transforms only on training data, and keep test results out of selection. The existing optional candidate selector ranks validation ROC AUC. Candidate scripts still report test metrics, so repeatedly comparing those reports would compromise the final evaluation.
-
-**Scaling — first three changes.**
-
-1. Replace full rescans with a durable arrival manifest/queue and stable source IDs/object versions; keep original objects in durable storage and acknowledge arrivals only after recording processing state.
-2. Separate bounded decoding and batched inference workers, with resource limits, retry/backoff, dead-letter handling and processing latency/failure monitoring.
-3. Replace local SQLite writes and whole-catalog UI reads with an indexed shared metadata store, idempotent transactional upserts, server-side pagination/aggregation, and separately stored thumbnails/features. Retain analytical exports for batch queries.
-
-**Incremental processing.** For tomorrow's 10,000 arrivals, hash the new arrivals and look up `(content hash, pipeline version)`; reuse metadata/features for known contents and compute missing `(content hash, model version)` predictions. A new source ID identifies a new arrival, an existing byte hash identifies an exact duplicate, and a persisted failure state identifies a retry candidate. This implementation follows that pattern locally. Re-running a directory still reads bytes to hash every file, and NPZ import still enumerates/encodes every array; it avoids repeated extraction/inference, not discovery or hashing. At a million images, the arrival manifest is the first priority. Metadata version changes invalidate extraction, while model/threshold changes invalidate only inference. Production retry history should record attempt timestamps, error categories and backoff, beyond the current extraction count/latest error.
-
-## Project layout and optional experiments
-
-- `app.py`: Streamlit explorer.
-- `src/image_pipeline.py`: application ingestion, inference and SQLite catalog.
-- `src/build_database.py`, `src/analyze.py`, `sql/analysis.sql`: original NPZ research/QC path.
-- `src/model.py`, `src/model_utils.py`: baseline training, metrics and provenance.
-- `src/model_svm.py`, `src/model_xgboost.py`, `src/select_best_model.py`, `src/create_predictions.py`, `src/explain_shap.py`: optional model comparison, batch predictions and SHAP artifacts.
-- `config.toml`, `src/project_config.py`: shared dataset and experiment paths.
-- `tests/`: ingestion, inference, NPZ bridge and Streamlit smoke tests.
-- `tools/check_no_private_data.py`: fails if dataset files or derived artifacts are tracked by git (`--git`) or present in a directory (used by the Docker build).
-- `Dockerfile`, `compose.yaml`: container build and run configuration.
-
-The explorer deliberately uses the logistic baseline; it does not silently adopt an optional experiment winner. See `CONFIG_AND_OUTPUTS.md` for experiment outputs. All optional experiment dependencies are included in `requirements.txt`. Existing scripts expose their arguments with `--help`.
-
-## Verification
-
-```bash
-python -m pytest -q
+```
+NPZ_PATH=C:\path\to\pneumoniamnist.npz
+IMAGE=hmgill/pneumoniamnist-explorer:1.0.0
 ```
 
-Tests cover nested discovery, unsupported/corrupt files, exact duplicates, cached processing, retries, replacement at a path, format mismatch, frame/pixel limits, real scikit-learn inference, model-version invalidation, NPZ split/label preservation, and Streamlit empty/populated/search states. Tests use synthetic inputs to verify mechanics, not medical model performance. No measured real-dataset accuracy is claimed for this delivery.
+Then run `docker compose pull` instead of building, and continue from step 3 of Option A. Use `docker compose up --no-build` to start the app.
 
-Streamlit API reference: [file uploads](https://docs.streamlit.io/develop/api-reference/widgets/st.file_uploader), [app testing](https://docs.streamlit.io/develop/api-reference/app-testing/st.testing.v1.apptest).
+**Without the repo**, use plain `docker run`. This example is for Command Prompt; use `` ` `` for line breaks in PowerShell or `\` on macOS/Linux. First create a named volume for the catalog databases:
 
-Delivery verification: the original metadata → SQL analysis → baseline training → catalog inference workflow completed on 64 synthetic images. Real-dataset evaluation was not run because the provided archive did not include the NPZ or trained weights.
+```cmd
+docker volume create pneumonia-data
+```
 
+Then run each step with the same mounts:
 
-## SHAP overlays in Streamlit
+```cmd
+docker run --rm ^
+  -v "C:\path\to\pneumoniamnist.npz:/input/pneumoniamnist.npz:ro" ^
+  -v pneumonia-data:/app/data ^
+  -v "%cd%\output:/app/output" ^
+  hmgill/pneumoniamnist-explorer:1.0.0 python src/build_database.py
+```
 
-Select an image in **Images → Image details**, open **Explain prediction · SHAP**,
-and click **Explain prediction**. The viewer displays the exact 28×28 grayscale
-model input, signed attributions and an aligned overlay. A PNG download is
-provided. This works with existing fitted logistic baselines; no retraining or
-NPZ is required for viewer explanations. Invalid/unclassified images cannot be
-explained. If the model/threshold fingerprint or stored score is stale, re-ingest
-that image before explaining it.
+Repeat that command with `python src/analyze.py`, `python src/model.py` and `python src/image_pipeline.py --npz /input/pneumoniamnist.npz` in place of `python src/build_database.py`. Finally start the app with the same mounts, plus `-p 8501:8501` and `-e IMAGE_EXPLORER_LOCAL_IMPORT=1`, and no command at the end.
 
-### Correctness and interpretation
+### Option C: Local Python (3.12)
 
-The baseline is a StandardScaler followed by binary LogisticRegression. For a
-standardized pixel `z_j`, the exact **interventional SHAP value** is
-`phi_j = coefficient_j * (z_j - background_mean_j)`. These values explain
-**class 1 (pneumonia) log-odds**, not changes in probability and not the predicted
-class's score. Red increases pneumonia log-odds; blue decreases them, including
-when the predicted class is normal. The validation-selected classification
-threshold does not change these contributions.
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python -m pip install -r requirements.txt
 
-The viewer uses the full training population mean retained by the fitted
-StandardScaler. That mean becomes zero after centering; the baseline log-odds is
-therefore the learned intercept. If train-only augmentation was used, the
-reference includes the augmented training population. No validation, test or
-uploaded images enter this background. For this linear interventional game,
-only the background feature means are needed, so the closed-form implementation
-does not need a SHAP runtime dependency. Its formula follows the
-[SHAP LinearExplainer documentation](https://shap.readthedocs.io/en/latest/generated/shap.LinearExplainer.html).
+export PNEUMONIAMNIST_NPZ=/path/to/pneumoniamnist.npz   # Windows: see Configuration
 
-Every explanation checks `baseline + sum(phi) == decision_function(input)` and
-`sigmoid(baseline + sum(phi)) == predict_proba(input)[1]` within numerical
-tolerances. The viewer additionally verifies the stored model fingerprint and
-stored pneumonia score. It shows the baseline, contribution sum, reconstructed
-log-odds, pneumonia score and additivity residual. The sigmoid of baseline
-log-odds is not necessarily the mean training probability.
+python src/build_database.py
+python src/analyze.py
+python src/model.py
+python src/image_pipeline.py --npz "$PNEUMONIAMNIST_NPZ"
+python -m streamlit run app.py
+```
 
-`src/linear_shap.py` is shared by the viewer and the existing logistic SHAP
-exporter. The exporter still uses its explicitly sampled training background;
-its attributions can consequently differ from the viewer's full-training-mean
-reference. This is an intentional reference choice, not a probability/log-odds
-conversion. The exporter now also checks numerical reconstruction. The optional
-XGBoost exporter is unchanged and is not supported by the viewer.
+`requirements.txt` is the single, pinned dependency file. It covers the app, the optional experiments (MLflow, XGBoost, SHAP, Albumentations) and the tests.
 
-The overlay uses model-resolution pixels with no interpolation. The color range
-is symmetric about zero and scaled per image; overlay opacity reflects absolute
-contribution so zero-valued pixels remain transparent. Colors should not be
-compared quantitatively across images without checking their color bars. Pixel
-dependence is ignored: these are not correlation-dependent SHAP values, causal
-claims, or anatomical lesion masks.
+---
 
-### Additional verification
+## Data handling
 
-The tests independently compare contributions with an exhaustive coalition-based
-Shapley calculation on a small model and with the SHAP library's LinearExplainer.
-They also cover a constant feature, full-training and explicit sampled
-backgrounds, model-output reconstruction, invalid input, stale model/score
-rejection, PNG generation, and the Streamlit explanation button. The SHAP
-library is a development/test dependency only for these reference checks.
+PneumoniaMNIST is public, but in this project it **stands in for private data**. The rule is that no dataset file, and nothing derived from it, leaves the machine it is processed on.
+
+- **Git.** `.gitignore` excludes the NPZ, all databases, fitted models, and everything under `data/` and `output/`. That covers metadata CSVs with per-image hashes, QC figures that render real images, models whose scaler stores the mean training image, and logs containing local paths.
+- **Docker.** `.dockerignore` is an allowlist, so only source code enters the build context. The NPZ is mounted read-only at run time and is never copied into the image.
+- **Guard script.** `tools/check_no_private_data.py` detects dataset archives by content as well as by name, so a renamed copy is still caught. The Docker build runs it and fails on a match. Run it before every push:
+
+  ```bash
+  python tools/check_no_private_data.py --git
+  ```
+
+---
+
+## Pipeline
+
+| Step | Command | What it does | Main outputs |
+|---|---|---|---|
+| 1. Build | `src/build_database.py` | Validates the NPZ (arrays, labels, 28×28 dimensions, missing values), derives per-image metadata, and flags low-variance images and cross-split duplicates | `data/pneumoniamnist.duckdb`, metadata CSV |
+| 2. Analyze | `src/analyze.py` | Runs the SQL analysis views in `sql/analysis.sql` for class balance, image characteristics, duplicates and unusual images | `output/analysis/` |
+| 3. Train | `src/model.py` | Fits the StandardScaler + logistic-regression baseline, selects a Youden-J threshold on validation, and evaluates on test | `output/models/logistic/` |
+| 4. Ingest | `src/image_pipeline.py` | Loads the NPZ splits or an image folder into the app catalog and classifies each image | `data/image_catalog.sqlite3` |
+| 5. Explore | `streamlit run app.py` | Interactive explorer | — |
+
+Useful ingestion flags:
+
+- `--directory PATH` ingests a folder of ordinary images recursively instead of the NPZ.
+- `--metadata-only` catalogs images before a model exists. They get status `awaiting_model`, not invented predictions.
+- `--retry-failed` retries decoding or inference failures. Modified files are detected automatically.
+
+Every script documents its options with `--help`.
+
+---
+
+## Using the app
+
+- **Add images:** upload PNG, JPEG, BMP, TIFF or WebP files from the sidebar.
+- **Filter and sort:**
+  - Search by filename or path.
+  - Filter by class, status, split, outcome (correct, false positive or false negative), format, minimum score, dimensions and file size.
+  - Show duplicates only.
+- **Browse:** a paginated thumbnail gallery, a table view, class and status distributions, and per-split model metrics.
+- **Inspect an image:**
+  - Prediction, score and outcome versus the ground-truth label.
+  - Full metadata and EXIF.
+  - A **SHAP overlay** with a Show overlay toggle, an Opacity slider and hover values.
+  - **Save snapshot** downloads the current view as a PNG.
+- **Export:** download the filtered catalog as CSV. EXIF and source paths are omitted by default.
+
+Server-side folder and NPZ import buttons are hidden unless `IMAGE_EXPLORER_LOCAL_IMPORT=1` is set. Compose enables them, and inside a container they only see the container's filesystem.
+
+---
+
+## Configuration
+
+Shared paths and settings live in `config.toml`. The following environment variables override them:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `PNEUMONIAMNIST_NPZ` | Dataset location for all scripts (overrides `[paths].dataset`) | `data/pneumoniamnist.npz` |
+| `NPZ_PATH` | *Compose only:* host path of the NPZ to mount | required |
+| `OUTPUT_DIR` | *Compose only:* host folder for results | `./output` |
+| `IMAGE` | *Compose only:* image to run, e.g. the Docker Hub image | `pneumoniamnist-explorer:latest` |
+| `IMAGE_CATALOG_DB` | SQLite catalog used by the app (the CLI uses `--database`) | `data/image_catalog.sqlite3` |
+| `IMAGE_EXPLORER_LOCAL_IMPORT` | Set to `1` to show the server-side import buttons | off |
+
+Windows shells set these variables differently; see the table in [Option A](#option-a-docker-recommended). See `CONFIG_AND_OUTPUTS.md` for the full output layout.
+
+---
+
+## Design
+
+### Catalog storage
+
+The app uses a **SQLite** catalog with two related tables:
+
+- `images` has one row per SHA-256 hash of the encoded file bytes. It holds metadata, the thumbnail, the inference features and predictions.
+- `sources` has one row per path or upload identity. It holds the filename, split and label.
+
+This design has several consequences:
+
+- Identical bytes at two paths get two source records but are processed once.
+- Re-uploading the same file is idempotent.
+- A modified file at an existing path points to its new content.
+- Labels and splits live on source records and never feed inference.
+- Statuses are `complete`, `awaiting_model`, `failed`, `model_error` and `unsupported`.
+- Writes are atomic per image. WAL mode with a busy timeout supports concurrent local sessions.
+
+**Validation** runs Pillow's verify step *and* a full decode. Corrupt files, extension or format mismatches and multi-frame files are recorded separately. Images are limited to 25 MiB and 25 million pixels. **Processing** corrects EXIF orientation, stores an RGB thumbnail, and resizes to 28×28 grayscale float32 features.
+
+**DuckDB** remains the analytical store for the research workflow (steps 1–3). SQLite suits small incremental writes and ships with Python. NPZ ingestion (step 4) is the explicit bridge between the two stores.
+
+"Duplicate" means identical encoded bytes, not perceptual similarity. The research QC separately hashes decoded pixel arrays to find exact duplicates across splits. NPZ images are stored as deterministic PNGs, so their format and size describe those PNGs, not original hospital files.
+
+### Model
+
+The model is a **linear baseline**: a StandardScaler over the 784 pixels followed by binary logistic regression.
+
+- The decision threshold is chosen on the validation split (Youden's J). The test split is used only for evaluation.
+- Predictions record a SHA-256 fingerprint of the model and threshold files. Changing either triggers re-inference on the next ingestion.
+- The baseline is cheap to train on CPU, reproducible and easy to explain.
+- The app always uses this baseline. It does not silently switch to a winner from the optional experiments (`model_svm.py`, `model_xgboost.py`, `select_best_model.py`).
+
+### SHAP explanations
+
+For a linear model, exact interventional SHAP values have a closed form:
+
+`phi_j = coef_j × (z_j − background_mean_j)`
+
+Here `z_j` is the standardized pixel value. The background is the full training mean stored by the scaler. That mean is zero after standardization, so the baseline value is the model's intercept.
+
+- **What the values mean.** They explain **pneumonia log-odds** (class 1). Red pixels raise the pneumonia score and blue pixels lower it, whatever the predicted class. The decision threshold does not affect them.
+- **Built-in checks.** Every explanation verifies that `intercept + Σphi` reproduces `decision_function`, and that its sigmoid reproduces `predict_proba`. The viewer also rejects explanations whose model fingerprint or stored score is stale.
+- **Display.** The color scale is symmetric and scaled per image, so colors are not comparable across images. The 28×28 attribution grid is upsampled for display; hover values are per model pixel.
+- **Assumptions.** The values treat pixels as independent. They are not causal claims or lesion masks.
+- **Exporter differences.** `src/linear_shap.py` is shared with the optional batch exporter (`explain_shap.py`). The exporter uses a sampled training background, so its values can differ slightly from the viewer's. The XGBoost exporter is not supported in the viewer.
+
+The closed form follows the [SHAP LinearExplainer](https://shap.readthedocs.io/en/latest/generated/shap.LinearExplainer.html). The tests check it against both an exhaustive Shapley calculation and the SHAP library.
+
+---
+
+## Limitations
+
+- **Spatial structure.** Flattened pixels discard spatial structure and are sensitive to crop, orientation, acquisition and intensity differences.
+- **Out-of-domain inputs.** Resizing an arbitrary upload does not make it in-domain. There is no modality or out-of-distribution check, so a photograph can receive a chest-X-ray label.
+- **Scores are not probabilities.** The displayed score is the uncalibrated score of the threshold-selected class. With a non-0.5 threshold it can be below 0.5. It is not a validated probability of disease.
+- **Trusted model files only.** Model files are joblib, which uses pickle, so only load trusted, locally generated models. The app does not accept model uploads.
+- **EXIF privacy.** EXIF can contain sensitive information. It is shown in the local details panel but excluded from the default CSV.
+- **Local use only.** A hosted, multi-user deployment would need authentication, isolation and retention controls.
+
+---
+
+## Research and data-engineering notes
+
+**Data leakage.** The main risks are:
+
+- The same patient, repeated studies, near-duplicates or augmented copies crossing splits.
+- Preprocessing fitted before the split.
+- Site, device or text markers that correlate with labels.
+- Temporal leakage.
+- Repeated tuning against test results.
+
+The NPZ supports pixel-hash overlap and label-conflict checks. It has no patient, study, date, site or device information, so these risks cannot be ruled out. The remedies are:
+
+- Split by patient or study, and evaluate site and time holdouts where appropriate.
+- Fit transforms on training data only.
+- Keep test results out of model selection. The optional selector ranks on validation ROC AUC, but the candidate scripts still report test metrics, so repeatedly comparing those reports would compromise the final evaluation.
+
+**Scaling: the first three changes.**
+
+1. Replace full rescans with a durable arrival manifest or queue and stable source IDs. Keep originals in durable storage, and acknowledge arrivals only after their processing state is recorded.
+2. Separate bounded decoding workers from batched inference workers. Add resource limits, retry with backoff, dead-letter handling, and latency and failure monitoring.
+3. Move from local SQLite and whole-catalog UI reads to a shared, indexed metadata store. Use transactional upserts, server-side pagination and aggregation, and separate storage for thumbnails and features.
+
+**Incremental processing.** For a batch of new arrivals:
+
+- Hash each file and look up `(content hash, pipeline version)` to reuse existing metadata and features.
+- Compute only the missing `(content hash, model version)` predictions.
+- A new source ID marks a new arrival, an existing hash marks a duplicate, and a stored failure state marks a retry candidate.
+- Metadata-version changes invalidate extraction, while model or threshold changes invalidate only inference.
+
+The current implementation follows this pattern locally. It still re-reads and hashes every file on a rescan, so at a million images the arrival manifest becomes the first priority. Production retry history should also record timestamps, error categories and backoff.
+
+---
+
+## Publishing the image
+
+This section is for maintainers. The image is safe to publish because it is built only from the allowlisted source files, and the build runs the data-leak guard. Before pushing a new version, confirm three things.
+
+**1. The guard passes inside the built image:**
+
+```bash
+docker run --rm pneumoniamnist-explorer python tools/check_no_private_data.py /app
+```
+
+**2. No dataset-named files exist anywhere in the image.** This should print nothing:
+
+```bash
+docker run --rm pneumoniamnist-explorer find / -xdev -iname "*pneumonia*" -not -path "/proc/*"
+```
+
+**3. The layer history shows no unexpected content.** Every step should come from the Dockerfile, and the single `COPY` layer should be small:
+
+```bash
+docker history --no-trunc pneumoniamnist-explorer
+```
+
+Then tag and push:
+
+```bash
+docker login
+docker tag pneumoniamnist-explorer hmgill/pneumoniamnist-explorer:1.0.0
+docker tag pneumoniamnist-explorer hmgill/pneumoniamnist-explorer:latest
+docker push hmgill/pneumoniamnist-explorer:1.0.0
+docker push hmgill/pneumoniamnist-explorer:latest
+```
+
+As an extra precaution, build from a clean clone rather than a working folder that has data in it. `.dockerignore` and the guard keep data out of the image either way.
+
+---
+
+## Project layout
+
+```
+app.py                      Streamlit explorer
+config.toml                 Shared paths and settings
+requirements.txt            Pinned dependencies (app, experiments, tests)
+Dockerfile, compose.yaml    Container build and run configuration
+sql/analysis.sql            Research analysis views
+src/
+  build_database.py         Step 1: NPZ validation and metadata
+  analyze.py                Step 2: SQL analysis and QC outputs
+  model.py, model_utils.py  Step 3: baseline training, metrics, provenance
+  image_pipeline.py         Step 4: ingestion, inference, SQLite catalog
+  linear_shap.py            Closed-form linear SHAP (shared)
+  model_svm.py, model_xgboost.py, select_best_model.py,
+  create_predictions.py, explain_shap.py     Optional experiments
+  project_config.py, runtime.py, utils.py, ...  Shared helpers
+tests/                      Pipeline, SHAP and Streamlit tests
+tools/check_no_private_data.py   Data-leak guard (git and Docker)
+data/, output/              Generated locally; never committed
+```
+
+---
+
+## Testing
+
+```bash
+python -m pytest -q                                            # local
+docker run --rm pneumoniamnist-explorer python -m pytest -q    # Docker
+```
+
+All 13 tests pass on Python 3.12, both locally and in the Docker image. They use synthetic inputs and check the pipeline's mechanics, not medical performance:
+
+- Nested discovery, unsupported and corrupt files, format mismatch, and frame and pixel limits.
+- Exact duplicates, cached processing, retries, and replacement at a path.
+- Real scikit-learn inference, model-version invalidation, and NPZ split and label preservation.
+- SHAP correctness against exhaustive Shapley values and the SHAP library, including stale-model rejection.
+- Streamlit empty, populated and search states, and the overlay controls.
+
+The full workflow (all 5,030 images through build → analyze → train → ingest → app) has also been run end to end in the container. Real-dataset metrics are written to `output/models/logistic/` and are intentionally not committed.

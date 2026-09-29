@@ -9,6 +9,10 @@
 
 FROM python:3.12-slim
 
+LABEL org.opencontainers.image.title="PneumoniaMNIST Image Explorer" \
+      org.opencontainers.image.description="Image ingestion, classification and Streamlit explorer. Contains no dataset; mount your own NPZ at /input/pneumoniamnist.npz." \
+      org.opencontainers.image.source="https://github.com/hmgill/takehome_project"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \

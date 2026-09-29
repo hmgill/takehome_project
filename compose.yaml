@@ -7,7 +7,11 @@
 services:
   explorer:
     build: .
-    image: pneumoniamnist-explorer:latest
+    # Local builds are tagged pneumoniamnist-explorer:latest. To use the
+    # published image instead, set IMAGE (e.g. in .env) to
+    # hmgill/pneumoniamnist-explorer:1.0.0 and run `docker compose pull`
+    # before the usual commands (use `docker compose up --no-build`).
+    image: ${IMAGE:-pneumoniamnist-explorer:latest}
     ports:
       - "8501:8501"
     environment:
