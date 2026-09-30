@@ -1,6 +1,8 @@
 # Usage (PowerShell):
 #   $env:NPZ_PATH = "C:\Users\you\datasets\pneumoniamnist.npz"
 #   docker compose up --build
+# The first start runs the whole pipeline, then the app; later starts reuse
+# the saved results and go straight to the app.
 # Or put NPZ_PATH=... in a local .env file (git-ignored).
 # Results are written to ./output on your machine (override with OUTPUT_DIR).
 
@@ -9,16 +11,13 @@ services:
     build: .
     # Local builds are tagged pneumoniamnist-explorer:latest. To use the
     # published image instead, set IMAGE (e.g. in .env) to
-    # hmgill/pneumoniamnist-explorer:1.0.0 and run `docker compose pull`
+    # hmgill/pneumoniamnist-explorer:1.1.0 and run `docker compose pull`
     # before the usual commands (use `docker compose up --no-build`).
     image: ${IMAGE:-pneumoniamnist-explorer:latest}
     ports:
       - "8501:8501"
     environment:
       PNEUMONIAMNIST_NPZ: /input/pneumoniamnist.npz
-      # Shows the "Import NPZ dataset" / local folder buttons in the sidebar.
-      # They only see the container's filesystem.
-      IMAGE_EXPLORER_LOCAL_IMPORT: "1"
     volumes:
       - type: bind
         source: ${NPZ_PATH:?Set NPZ_PATH to the full path of your pneumoniamnist.npz}

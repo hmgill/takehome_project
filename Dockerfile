@@ -2,8 +2,9 @@
 #
 # PneumoniaMNIST Image Explorer
 #
-# The dataset is NOT part of this image. Mount your own copy at runtime:
-#   docker run -p 8501:8501 \
+# The dataset is NOT part of this image. Mount your own copy at runtime;
+# the default command runs the whole pipeline and then starts the app:
+#   docker run --rm -p 8501:8501 \
 #     -v "C:\path\to\pneumoniamnist.npz:/input/pneumoniamnist.npz:ro" \
 #     pneumoniamnist-explorer
 
@@ -46,12 +47,15 @@ ENV PNEUMONIAMNIST_NPZ=/input/pneumoniamnist.npz \
     STREAMLIT_SERVER_PORT=8501 \
     STREAMLIT_SERVER_HEADLESS=true \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
-    PYTEST_ADDOPTS="-p no:cacheprovider"
+    PYTEST_ADDOPTS="-p no:cacheprovider" \
+    IMAGE_EXPLORER_LOCAL_IMPORT=1
 
-VOLUME ["/app/data", "/app/output"]
 EXPOSE 8501
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+# Generous start period: the pipeline runs before Streamlit starts
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5m --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=4)"
 
-CMD ["python", "-m", "streamlit", "run", "app.py"]
+# Run the pipeline (skipping steps whose outputs exist), then the app.
+# Any other command, e.g. `python -m pytest -q`, replaces this.
+CMD ["python", "src/run_all.py"]

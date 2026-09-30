@@ -44,52 +44,42 @@ Or set it for the current shell instead:
 | PowerShell | `$env:NPZ_PATH = "C:\path\to\pneumoniamnist.npz"` |
 | macOS/Linux | `export NPZ_PATH=/path/to/pneumoniamnist.npz` |
 
-**3. Run the pipeline and start the app.**
+**3. Start it.**
 
 ```bash
-docker compose run --rm explorer python src/build_database.py
-docker compose run --rm explorer python src/analyze.py
-docker compose run --rm explorer python src/model.py
-docker compose run --rm explorer python src/image_pipeline.py --npz /input/pneumoniamnist.npz
-docker compose up
+docker compose up --build
 ```
+
+The first start runs the whole pipeline (build → analyze → train → ingest, about a minute), then the app. Later starts reuse the saved results and go straight to the app.
 
 **4. Open the app** at <http://localhost:8501>.
 
-Results (QC tables, figures, model metrics, logs) are written to `./output` on your machine. The catalog databases live in a Docker volume. `docker compose down -v` removes that volume; delete `./output` yourself when you are finished.
+Results (QC tables, figures, model metrics, logs) are written to `./output` on your machine. The catalog databases live in a Docker volume so restarts are fast. `docker compose down -v` removes that volume; delete `./output` yourself when you are finished.
+
+To run a single step yourself, pass it as the command, e.g. `docker compose run --rm explorer python src/model.py`, or `python src/run_all.py --force` to redo everything.
 
 > **Host vs container paths.** `NPZ_PATH` is a path on your machine. Anything passed to a script runs *inside* the container, which only sees the mounted copy at `/input/pneumoniamnist.npz`. A path like `D:\...` will not be found there.
 
 ### Option B: Published image from Docker Hub
 
-The image is published as [`hmgill/pneumoniamnist-explorer`](https://hub.docker.com/r/hmgill/pneumoniamnist-explorer). Like a local build, it contains code and dependencies only, with no dataset and no trained model. It still needs your own NPZ.
+The image is published as [`hmgill/pneumoniamnist-explorer`](https://hub.docker.com/r/hmgill/pneumoniamnist-explorer). Like a local build, it contains code and dependencies only, with no dataset and no trained model. It still needs your own NPZ, and no clone of this repo is required.
 
-**With a clone of this repo**, add the image name to `.env` alongside `NPZ_PATH`:
-
-```
-NPZ_PATH=C:\path\to\pneumoniamnist.npz
-IMAGE=hmgill/pneumoniamnist-explorer:1.0.0
-```
-
-Then run `docker compose pull` instead of building, and continue from step 3 of Option A. Use `docker compose up --no-build` to start the app.
-
-**Without the repo**, use plain `docker run`. This example is for Command Prompt; use `` ` `` for line breaks in PowerShell or `\` on macOS/Linux. First create a named volume for the catalog databases:
+One command runs the pipeline and starts the app. This example is for Command Prompt; use `` ` `` for line breaks in PowerShell or `\` on macOS/Linux:
 
 ```cmd
-docker volume create pneumonia-data
-```
-
-Then run each step with the same mounts:
-
-```cmd
-docker run --rm ^
+docker run --rm -p 8501:8501 ^
   -v "C:\path\to\pneumoniamnist.npz:/input/pneumoniamnist.npz:ro" ^
-  -v pneumonia-data:/app/data ^
   -v "%cd%\output:/app/output" ^
-  hmgill/pneumoniamnist-explorer:1.0.0 python src/build_database.py
+  hmgill/pneumoniamnist-explorer:1.1.0
 ```
 
-Repeat that command with `python src/analyze.py`, `python src/model.py` and `python src/image_pipeline.py --npz /input/pneumoniamnist.npz` in place of `python src/build_database.py`. Finally start the app with the same mounts, plus `-p 8501:8501` and `-e IMAGE_EXPLORER_LOCAL_IMPORT=1`, and no command at the end.
+Open <http://localhost:8501> once the log shows `Starting Streamlit`. Press Ctrl+C to stop.
+
+- The catalog databases live inside the container and are deleted with it (`--rm`), so there is nothing to clean up except `output/`. Each start reprocesses the dataset, which takes about a minute.
+- The `output` mount is optional. Leave it out and nothing is written to your machine at all. Keep it and a later start reuses the trained model instead of retraining.
+- To run the tests: `docker run --rm hmgill/pneumoniamnist-explorer:1.1.0 python -m pytest -q`
+
+With a clone of this repo, you can use Compose with the published image instead: add `IMAGE=hmgill/pneumoniamnist-explorer:1.1.0` to `.env`, run `docker compose pull`, then `docker compose up --no-build`.
 
 ### Option C: Local Python (3.12)
 
@@ -135,6 +125,8 @@ PneumoniaMNIST is public, but in this project it **stands in for private data**.
 | 4. Ingest | `src/image_pipeline.py` | Loads the NPZ splits or an image folder into the app catalog and classifies each image | `data/image_catalog.sqlite3` |
 | 5. Explore | `streamlit run app.py` | Interactive explorer | — |
 
+`src/run_all.py` runs steps 1–5 in order, skipping any step whose output already exists (`--force` reruns everything, `--no-app` stops before the app). It is the Docker image's default command, and works locally too.
+
 Useful ingestion flags:
 
 - `--directory PATH` ingests a folder of ordinary images recursively instead of the NPZ.
@@ -160,7 +152,7 @@ Every script documents its options with `--help`.
   - **Save snapshot** downloads the current view as a PNG.
 - **Export:** download the filtered catalog as CSV. EXIF and source paths are omitted by default.
 
-Server-side folder and NPZ import buttons are hidden unless `IMAGE_EXPLORER_LOCAL_IMPORT=1` is set. Compose enables them, and inside a container they only see the container's filesystem.
+Server-side folder and NPZ import buttons are hidden unless `IMAGE_EXPLORER_LOCAL_IMPORT=1` is set. The Docker image sets it; inside a container those buttons only see the container's filesystem.
 
 ---
 
@@ -175,7 +167,7 @@ Shared paths and settings live in `config.toml`. The following environment varia
 | `OUTPUT_DIR` | *Compose only:* host folder for results | `./output` |
 | `IMAGE` | *Compose only:* image to run, e.g. the Docker Hub image | `pneumoniamnist-explorer:latest` |
 | `IMAGE_CATALOG_DB` | SQLite catalog used by the app (the CLI uses `--database`) | `data/image_catalog.sqlite3` |
-| `IMAGE_EXPLORER_LOCAL_IMPORT` | Set to `1` to show the server-side import buttons | off |
+| `IMAGE_EXPLORER_LOCAL_IMPORT` | Set to `1` to show the server-side import buttons | off locally, on in Docker |
 
 Windows shells set these variables differently; see the table in [Option A](#option-a-docker-recommended). See `CONFIG_AND_OUTPUTS.md` for the full output layout.
 
@@ -298,13 +290,13 @@ docker run --rm pneumoniamnist-explorer find / -xdev -iname "*pneumonia*" -not -
 docker history --no-trunc pneumoniamnist-explorer
 ```
 
-Then tag and push:
+Then tag the new version and push it. Bump the version for every release and update the tag in Option B:
 
 ```bash
 docker login
-docker tag pneumoniamnist-explorer hmgill/pneumoniamnist-explorer:1.0.0
+docker tag pneumoniamnist-explorer hmgill/pneumoniamnist-explorer:1.1.0
 docker tag pneumoniamnist-explorer hmgill/pneumoniamnist-explorer:latest
-docker push hmgill/pneumoniamnist-explorer:1.0.0
+docker push hmgill/pneumoniamnist-explorer:1.1.0
 docker push hmgill/pneumoniamnist-explorer:latest
 ```
 
@@ -325,6 +317,7 @@ src/
   analyze.py                Step 2: SQL analysis and QC outputs
   model.py, model_utils.py  Step 3: baseline training, metrics, provenance
   image_pipeline.py         Step 4: ingestion, inference, SQLite catalog
+  run_all.py                Steps 1-5 in one command (Docker default)
   linear_shap.py            Closed-form linear SHAP (shared)
   model_svm.py, model_xgboost.py, select_best_model.py,
   create_predictions.py, explain_shap.py     Optional experiments
