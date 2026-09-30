@@ -358,7 +358,7 @@ def load_dataset_splits(
             "(cross-split duplicates may be present)"
         )
     else:
-        logger.info(
+        logger.success(
             "Deduplicated {} records to {} unique images "
             "({} duplicate groups, {} redundant copies removed, "
             "{} label-conflict groups, policy='{}')",
@@ -370,7 +370,7 @@ def load_dataset_splits(
             report["label_conflict_policy"],
         )
 
-    logger.info(
+    logger.success(
         "Split sizes: train={}, val={}, test={} (fingerprint {})",
         len(splits.train),
         len(splits.val),

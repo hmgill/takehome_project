@@ -138,6 +138,7 @@ def run_model(
             enabled=use_mlflow,
             model=model,
             model_type="logistic_regression",
+            input_example=X_train,
         )
 
     logger.success("Part 3 baseline completed successfully")

@@ -14,10 +14,13 @@ LABEL org.opencontainers.image.title="PneumoniaMNIST Image Explorer" \
       org.opencontainers.image.description="Image ingestion, classification and Streamlit explorer. Contains no dataset; mount your own NPZ at /input/pneumoniamnist.npz." \
       org.opencontainers.image.source="https://github.com/hmgill/takehome_project"
 
+# GIT_PYTHON_REFRESH: the image has no git, so stop MLflow warning that it
+# can't record a commit SHA.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    GIT_PYTHON_REFRESH=quiet
 
 WORKDIR /app
 

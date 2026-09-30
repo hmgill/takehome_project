@@ -178,6 +178,7 @@ def run_experiment(
             enabled=use_mlflow,
             model=model,
             model_type="svm",
+            input_example=X_train,
         )
 
     logger.success("SVM experiment completed successfully")

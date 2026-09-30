@@ -29,7 +29,7 @@ Windows Command Prompt:
 docker run --rm -p 8501:8501 ^
   -v "C:\path\to\pneumoniamnist.npz:/input/pneumoniamnist.npz:ro" ^
   -v "%cd%\output:/app/output" ^
-  hmgill/pneumoniamnist-explorer:1.1.0
+  hmgill/pneumoniamnist-explorer:1.3.1
 ```
 
 For PowerShell, use `` ` `` for line continuation. On macOS/Linux, use `\`.
@@ -42,7 +42,7 @@ A few useful variations:
 |---|---|
 | Leave no generated output on the host | Remove the `output` mount |
 | Force every pipeline step to rerun | Append `python src/run_all.py --force` |
-| Run the test suite | `docker run --rm hmgill/pneumoniamnist-explorer:1.1.0 python -m pytest -q` |
+| Run the test suite | `docker run --rm hmgill/pneumoniamnist-explorer:1.3.1 python -m pytest -q` |
 
 ---
 
@@ -74,7 +74,7 @@ Open <http://localhost:8501>. Generated results are written to `./output`.
 | Stop the stack | `docker compose down` |
 | Stop and delete the database volume | `docker compose down -v` |
 | Run one script | `docker compose run --rm explorer python src/model.py` |
-| Use the Docker Hub image instead of building | Add `IMAGE=hmgill/pneumoniamnist-explorer:1.1.0` to `.env`, then run `docker compose pull` and `docker compose up --no-build` |
+| Use the Docker Hub image instead of building | Add `IMAGE=hmgill/pneumoniamnist-explorer:1.3.1` to `.env`, then run `docker compose pull` and `docker compose up --no-build` |
 
 One Docker-specific detail: paths passed to scripts inside the container should use the container path `/input/pneumoniamnist.npz`, not the path on your host machine.
 
