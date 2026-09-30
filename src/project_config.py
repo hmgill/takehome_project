@@ -124,6 +124,7 @@ class SplitSettings:
 
 @dataclass(frozen=True)
 class MLflowSettings:
+    enabled: bool
     baseline_experiment: str
     experiments_experiment: str
 
@@ -275,6 +276,7 @@ def load_config(
             test_fraction=float(splits["test_fraction"]),
         ),
         mlflow=MLflowSettings(
+            enabled=bool(mlflow.get("enabled", False)),
             baseline_experiment=str(mlflow["baseline_experiment"]),
             experiments_experiment=str(mlflow["experiments_experiment"]),
         ),

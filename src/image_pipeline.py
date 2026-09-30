@@ -32,6 +32,15 @@ EXTENSIONS = {
 }
 PIPELINE_VERSION = "1"
 
+# Catalog `split` values for images that are not in the model's
+# train/val/test partition (see data_splits.py):
+#   external - uploaded or folder-ingested images from outside the NPZ
+#   excluded - NPZ images removed by deduplication (redundant duplicate
+#              copies, or duplicate groups with conflicting labels)
+EXTERNAL_SPLIT = "external"
+EXCLUDED_SPLIT = "excluded"
+MODEL_SPLITS = ("train", "val", "test")
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -153,6 +162,8 @@ def ingest_bytes(
     label=None,
 ):
     """One transaction per source. Byte-identical files share extraction and predictions."""
+    if split is None:
+        split = EXTERNAL_SPLIT
     digest = hashlib.sha256(data).hexdigest()
     extension = Path(filename).suffix.lower()
     source_status, source_error = "accepted", None
@@ -271,10 +282,10 @@ def ingest_path(con, path, classifier=None, retry_failed=False):
     except (OSError, ValueError) as exc:
         with con:
             con.execute(
-                """INSERT INTO sources VALUES (?,?,NULL,NULL,NULL,'failed',?,?)
+                """INSERT INTO sources VALUES (?,?,NULL,?,NULL,'failed',?,?)
                         ON CONFLICT(path) DO UPDATE SET image_id=NULL,source_status='failed',
                         source_error=excluded.source_error,seen_at=excluded.seen_at""",
-                (str(path), path.name, str(exc), now()),
+                (str(path), path.name, EXTERNAL_SPLIT, str(exc), now()),
             )
         return "failed"
     return ingest_bytes(con, data, path.name, str(path), classifier, retry_failed)
@@ -293,7 +304,24 @@ def ingest_directory(con, directory, classifier=None, retry_failed=False):
 
 
 def ingest_npz(con, dataset_path, classifier=None, retry_failed=False):
-    """Bridge existing NPZ experiments to the same image catalog; labels are audit-only."""
+    """
+    Bridge existing NPZ experiments to the same image catalog; labels are audit-only.
+
+    Each image is cataloged under the split it was assigned by the shared
+    deduplicated partition (``data_splits``), not its official NPZ split.
+    Copies removed by deduplication are cataloged as ``excluded``.
+    """
+    from data_splits import load_dataset_splits
+
+    partition = load_dataset_splits(Path(dataset_path))
+    assigned = {
+        (str(source_split), int(source_index)): split
+        for split in MODEL_SPLITS
+        for source_split, source_index in zip(
+            partition.get(split).source_split,
+            partition.get(split).source_index,
+        )
+    }
     results = []
     with np.load(dataset_path, allow_pickle=False) as dataset:
         for split in ("train", "val", "test"):
@@ -322,7 +350,7 @@ def ingest_npz(con, dataset_path, classifier=None, retry_failed=False):
                         f"{Path(dataset_path).resolve()}::{split}:{i}",
                         classifier,
                         retry_failed,
-                        split,
+                        assigned.get((split, i), EXCLUDED_SPLIT),
                         int(label),
                     )
                 )
@@ -331,7 +359,7 @@ def ingest_npz(con, dataset_path, classifier=None, retry_failed=False):
 
 def catalog(con):
     return pd.read_sql_query(
-        """SELECT s.path,s.filename,s.split,s.label,i.image_id,i.file_size,
+        f"""SELECT s.path,s.filename,COALESCE(s.split,'{EXTERNAL_SPLIT}') split,s.label,i.image_id,i.file_size,
         i.format,i.width,i.height,i.aspect_ratio,i.color_mode,i.megapixels,i.exif,
         CASE WHEN s.source_status='accepted' THEN i.processing_status ELSE s.source_status END processing_status,
         COALESCE(s.source_error,i.error) error,

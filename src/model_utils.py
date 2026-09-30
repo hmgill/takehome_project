@@ -217,8 +217,9 @@ def get_mlflow_context(
         import mlflow
     except ImportError as exc:
         raise RuntimeError(
-            "MLflow requested but not installed. "
-            "Install requirements-experiments.txt."
+            "MLflow tracking is enabled but mlflow is not installed. "
+            "Install requirements.txt, or pass --no-mlflow / set "
+            "[mlflow].enabled = false in config.toml."
         ) from exc
 
     tracking_dir.mkdir(
@@ -231,6 +232,34 @@ def get_mlflow_context(
     mlflow.set_experiment(experiment_name or CONFIG.mlflow.experiments_experiment)
 
     return mlflow.start_run(run_name=run_name)
+
+
+def split_parameters() -> dict:
+    """Summarize the current data partition as flat MLflow parameters."""
+
+    report_path = PATHS.splits_dir / "split_report.json"
+
+    if not report_path.exists():
+        return {}
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    keys = (
+        "strategy",
+        "split_fingerprint",
+        "label_conflict_policy",
+        "redundant_copies_removed",
+        "label_conflict_records_dropped",
+    )
+    params = {
+        (key if key.startswith("split_") else f"split_{key}"): report[key]
+        for key in keys
+        if key in report
+    }
+
+    for split, size in report.get("split_sizes", {}).items():
+        params[f"split_size_{split}"] = size
+
+    return params
 
 
 def log_mlflow_experiment(
@@ -246,6 +275,8 @@ def log_mlflow_experiment(
 
     import mlflow
 
+    parameters = {**split_parameters(), **parameters}
+
     mlflow.log_params({key: str(value) for key, value in parameters.items()})
     mlflow.log_metrics(
         {key: float(value) for key, value in metrics.items() if np.isfinite(value)}
@@ -253,6 +284,12 @@ def log_mlflow_experiment(
 
     for artifact in artifacts:
         mlflow.log_artifact(str(artifact))
+
+    # Record exactly which data partition this run was trained on.
+    for name in ("split_report.json", "split_manifest.csv"):
+        path = PATHS.splits_dir / name
+        if path.exists():
+            mlflow.log_artifact(str(path), artifact_path="splits")
 
 
 def log_mlflow_model(
