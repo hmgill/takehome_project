@@ -114,7 +114,8 @@ def test_npz_bridge(con, tmp_path):
     np.savez(path, **arrays)
     assert pipeline.ingest_npz(con, path) == {"awaiting_model": 6}
     rows = pipeline.catalog(con)
-    assert set(rows.split) == {"train", "val", "test"}
+    # One image with conflicting labels: every copy is excluded by dedup.
+    assert set(rows.split) == {pipeline.EXCLUDED_SPLIT}
     assert rows.image_id.nunique() == 1
     assert set(rows.label) == {0, 1}  # Preserve conflicting source labels for audit.
 
@@ -162,3 +163,40 @@ def test_inference_failure_and_explicit_retry(con):
                 == "complete"
             )
         predict.assert_called_once()
+
+
+def test_catalog_categories_for_npz_and_external_images(con, tmp_path):
+    rng = np.random.default_rng(0)
+    train = rng.integers(0, 256, (20, 28, 28), dtype=np.uint8)
+    val = rng.integers(0, 256, (6, 28, 28), dtype=np.uint8)
+    test = rng.integers(0, 256, (6, 28, 28), dtype=np.uint8)
+    test[0] = train[0]  # cross-split duplicate: one copy must be excluded
+    labels = lambda n: (np.arange(n) % 2).reshape(-1, 1)
+    npz = tmp_path / "toy.npz"
+    np.savez(
+        npz,
+        train_images=train,
+        train_labels=labels(20),
+        val_images=val,
+        val_labels=labels(6),
+        test_images=test,
+        test_labels=np.vstack([[0], labels(6)[1:]]),
+    )
+    pipeline.ingest_npz(con, npz)
+    pipeline.ingest_bytes(con, png(), "upload.png", "upload:1")
+
+    rows = pipeline.catalog(con)
+    counts = rows.split.value_counts().to_dict()
+
+    assert counts[pipeline.EXCLUDED_SPLIT] == 1
+    assert counts[pipeline.EXTERNAL_SPLIT] == 1
+    assert sum(counts.get(s, 0) for s in pipeline.MODEL_SPLITS) == 31
+    excluded = rows[rows.split == pipeline.EXCLUDED_SPLIT]
+    assert excluded.filename.iloc[0] == "test_000000.png"
+
+
+def test_legacy_null_split_reads_as_external(con):
+    pipeline.ingest_bytes(con, png(), "old.png", "upload:old")
+    with con:
+        con.execute("UPDATE sources SET split=NULL")
+    assert pipeline.catalog(con).split.iloc[0] == pipeline.EXTERNAL_SPLIT

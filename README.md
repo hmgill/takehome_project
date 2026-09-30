@@ -151,12 +151,10 @@ The default path through the project keeps the modeling intentionally simple, bu
 
 ### Track runs with MLflow
 
-Add `--mlflow` to the baseline, SVM, or XGBoost training command:
+MLflow tracking is on by default (`[mlflow].enabled = true` in `config.toml`), so every baseline, SVM, and XGBoost training run is recorded, including the Docker pipeline's baseline run. To skip tracking for one run, pass `--no-mlflow`:
 
 ```bash
-python src/model.py --mlflow
-python src/model_svm.py --mlflow
-python src/model_xgboost.py --mlflow
+python src/model.py --no-mlflow
 ```
 
 Runs are stored locally under `output/mlflow/`. To browse them:
@@ -167,7 +165,7 @@ mlflow ui --backend-store-uri ./output/mlflow
 
 Then open <http://127.0.0.1:5000>.
 
-The tracked runs include model parameters, evaluation metrics, saved artifacts, and model provenance. This makes it easier to compare experiments without having to keep separate notes or manually match output folders to a particular run.
+The tracked runs include model parameters, evaluation metrics, saved artifacts, model provenance, and the data partition used (split sizes, deduplication counts, a split fingerprint, and the split manifest under `splits/`). This makes it easier to compare experiments without having to keep separate notes or manually match output folders to a particular run.
 
 ### Compare classifier models
 

@@ -22,6 +22,9 @@ import linear_shap
 linear_shap = importlib.reload(linear_shap)
 from image_pipeline import (
     APP_DATABASE,
+    EXCLUDED_SPLIT,
+    EXTERNAL_SPLIT,
+    MODEL_SPLITS,
     MAX_FILE_BYTES,
     catalog,
     connect,
@@ -372,7 +375,16 @@ def interactive_view(composed, explanation):
 
 
 OUTCOMES = ["correct", "false positive", "false negative", "unlabeled"]
-SPLIT_ORDER = ["train", "val", "validation", "test"]
+SPLIT_ORDER = ["train", "val", "validation", "test", EXCLUDED_SPLIT, EXTERNAL_SPLIT]
+SPLIT_HELP = (
+    "train/val/test: the deduplicated partition the model was trained and "
+    f"evaluated on. {EXCLUDED_SPLIT}: dataset copies removed as duplicates. "
+    f"{EXTERNAL_SPLIT}: images added from outside the dataset."
+)
+
+
+def split_sort_key(value):
+    return (SPLIT_ORDER.index(value) if value in SPLIT_ORDER else 99, value)
 SPLIT_COLORS = {"train": "#94a3b8", "val": "#60a5fa", "validation": "#60a5fa", "test": ACCENT,
                 "all": "#0f172a"}
 
@@ -435,11 +447,17 @@ def split_metrics(df):
 
 def metrics_tab(df):
     labeled = df[df["outcome"] != "unlabeled"]
+    # Excluded copies duplicate images already counted in train/val/test;
+    # external images are outside the partition. Neither belongs in these metrics.
+    outside = ~labeled["split"].isin(MODEL_SPLITS)
+    if outside.any():
+        st.caption(f"{int(outside.sum())} labeled {EXCLUDED_SPLIT}/{EXTERNAL_SPLIT} "
+                   "images are not included in these metrics.")
+    labeled = labeled[~outside]
     if labeled.empty:
         st.info("No images have both a ground-truth label and a prediction.")
         return
-    splits = sorted(labeled["split"].dropna().unique(),
-                    key=lambda x: (SPLIT_ORDER.index(x) if x in SPLIT_ORDER else 99, x))
+    splits = sorted(labeled["split"].dropna().unique(), key=split_sort_key)
     groups = [(str(sp), labeled[labeled["split"] == sp]) for sp in splits]
     if labeled["split"].isna().any() or len(groups) != 1:
         groups.append(("all", labeled))
@@ -675,7 +693,8 @@ try:
         query = a.text_input("Search", key="search", placeholder="Filename or path")
         classes = b.multiselect("Class", sorted(data.predicted_class.dropna().unique()), key="classes")
         statuses = c.multiselect("Status", sorted(data.processing_status.unique()), key="statuses")
-        splits = d.multiselect("Split", sorted(data.split.dropna().unique()), key="splits")
+        splits = d.multiselect("Split", sorted(data.split.dropna().unique(), key=split_sort_key),
+                               key="splits", help=SPLIT_HELP)
         outcomes = o.multiselect(
             "Outcome", OUTCOMES, key="outcomes",
             placeholder="All", format_func=str.capitalize,

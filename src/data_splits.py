@@ -255,6 +255,7 @@ def build_dataset_splits(
             for split in SPLIT_ORDER
         }
         splits = DatasetSplits(**parts, report={"strategy": "official"})
+        splits.report["split_sizes"] = {s: len(parts[s]) for s in SPLIT_ORDER}
         splits.report["split_fingerprint"] = split_fingerprint(splits)
         return splits
 
@@ -267,19 +268,23 @@ def build_dataset_splits(
         test_fraction,
     )
 
-    development, test_positions = train_test_split(
-        keep,
-        test_size=test_fraction,
-        stratify=labels[keep],
-        random_state=random_seed,
-    )
+    if len(keep) == 0:
+        # Everything was removed (e.g. only conflicting duplicates).
+        development = test_positions = train_positions = val_positions = keep
+    else:
+        development, test_positions = train_test_split(
+            keep,
+            test_size=test_fraction,
+            stratify=labels[keep],
+            random_state=random_seed,
+        )
 
-    train_positions, val_positions = train_test_split(
-        development,
-        test_size=val_fraction / (1 - test_fraction),
-        stratify=labels[development],
-        random_state=random_seed,
-    )
+        train_positions, val_positions = train_test_split(
+            development,
+            test_size=val_fraction / (1 - test_fraction),
+            stratify=labels[development],
+            random_state=random_seed,
+        )
 
     common = (images, labels, image_hash, source_split, source_index)
 

@@ -47,6 +47,9 @@ val_fraction = 0.1
 test_fraction = 0.1
 
 [mlflow]
+# Track every training run in the local store under output/mlflow.
+# Override per run with --mlflow / --no-mlflow.
+enabled = true
 baseline_experiment = "pneumoniamnist"
 experiments_experiment = "pneumoniamnist_experiments"
 

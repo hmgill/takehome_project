@@ -82,6 +82,14 @@ source split/index and hash for every retained image) and
 report the assigned `split` plus `source_split`/`source_index`, which
 join to `main.image_metadata` in DuckDB.
 
+The Streamlit catalog uses the same partition. NPZ images are cataloged
+under their assigned `train`/`val`/`test` split; copies removed by
+deduplication are cataloged as `excluded`, and uploaded or
+folder-ingested images as `external`. Both can be selected in the app's
+Split filter and are left out of the per-split performance metrics. After
+upgrading, re-import the NPZ (or rerun `run_all.py --force`) so existing
+catalog rows pick up the new categories.
+
 Because the partition differs from the official MedMNIST splits, metrics
 are not directly comparable to published benchmarks. Set
 `deduplicate = false` to reproduce the official splits.

@@ -200,7 +200,15 @@ def parse_args() -> argparse.Namespace:
             "Disabled by default."
         ),
     )
-    parser.add_argument("--mlflow", action="store_true")
+    parser.add_argument(
+        "--mlflow",
+        action=argparse.BooleanOptionalAction,
+        default=CONFIG.mlflow.enabled,
+        help=(
+            "Track the run in the local MLflow store "
+            "(default from config.toml [mlflow].enabled)"
+        ),
+    )
     parser.add_argument("--mlflow-dir", type=Path, default=PATHS.mlflow_dir)
     parser.add_argument(
         "--log-level",

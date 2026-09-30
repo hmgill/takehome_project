@@ -154,8 +154,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=PATHS.model_dir("logistic"))
     parser.add_argument(
         "--mlflow",
-        action="store_true",
-        help="Track the run using a local MLflow store",
+        action=argparse.BooleanOptionalAction,
+        default=CONFIG.mlflow.enabled,
+        help=(
+            "Track the run in the local MLflow store "
+            "(default from config.toml [mlflow].enabled)"
+        ),
     )
     parser.add_argument(
         "--augment",
