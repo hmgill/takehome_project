@@ -1,7 +1,7 @@
 # Image Explorer: PneumoniaMNIST
 
 <p align="center">
-  <img src="media/pmnist_logo.jpg" alt="PneumoniaMNIST Image Explorer" width="650">
+  <img src="media/pmnist_logo.jpg" alt="PneumoniaMNIST Image Explorer" width="350">
 </p>
 A small end-to-end pipeline for working with the PneumoniaMNIST chest X-ray dataset. It validates the source data, builds a metadata database, runs a few QC and analysis steps, trains a simple classifier, and makes the results browsable in a Streamlit app.
 
