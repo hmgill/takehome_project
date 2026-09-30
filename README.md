@@ -7,14 +7,8 @@ A small end-to-end pipeline for working with the PneumoniaMNIST chest X-ray data
 
 Important: the PneumoniaMNIST dataset itself is deliberately excluded and must be downloaded separately.
 
-**Contents:** [Walkthrough video](#walkthrough-video) · [Dataset](#dataset) · [Run from Docker Hub](#run-from-docker-hub) · [Build and run with Docker](#build-and-run-with-docker) · [Run locally](#run-locally) · [Scripts](#scripts) · [Extra things to try](#extra-things-to-try) · [Configuration](#configuration) · [Tests](#tests)
+**Contents:**  [Dataset](#dataset) · [Run from Docker Hub](#run-from-docker-hub) · [Build and run with Docker](#build-and-run-with-docker) · [Run locally](#run-locally) · [Scripts](#scripts) · [Extra things to try](#extra-things-to-try) · [Configuration](#configuration) · [Tests](#tests)
 
----
-
-## Walkthrough video
-
-<!-- TODO: add the walkthrough video. -->
-*Coming soon.*
 
 ---
 
