@@ -5,6 +5,7 @@
 </p>
 A small end-to-end pipeline for working with the PneumoniaMNIST chest X-ray dataset. It validates the source data, builds a metadata database, runs a few QC and analysis steps, trains a simple classifier, and makes the results browsable in a Streamlit app.
 
+
 **Important:** the PneumoniaMNIST dataset itself is deliberately excluded and must be downloaded separately.
 
 **Contents:**  [Dataset](#dataset) · [Run from Docker Hub](#run-from-docker-hub) · [Build and run with Docker](#build-and-run-with-docker) · [Run locally](#run-locally) · [Scripts](#scripts) · [Extra things to try](#extra-things-to-try) · [Configuration](#configuration) · [Tests](#tests)
