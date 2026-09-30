@@ -1,4 +1,4 @@
-# Image Explorer: PneumoniaMNIST
+# PneumoniaMNIST Take Home Project
 
 <p align="center">
   <img src="media/pmnist_logo.jpg" alt="PneumoniaMNIST Image Explorer" width="350">
