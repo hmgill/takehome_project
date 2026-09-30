@@ -296,11 +296,20 @@ def log_mlflow_model(
     enabled: bool,
     model,
     model_type: str,
+    input_example: np.ndarray | None = None,
 ) -> None:
-    """Log the fitted model itself to the active MLflow run."""
+    """
+    Log the fitted model itself to the active MLflow run.
+
+    ``input_example`` (a few rows of training features) lets MLflow infer
+    and store the model's input/output signature.
+    """
 
     if not enabled:
         return
+
+    if input_example is not None:
+        input_example = np.asarray(input_example[:5], dtype=np.float32)
 
     if model_type == "xgboost":
         import mlflow.xgboost
@@ -309,6 +318,7 @@ def log_mlflow_model(
             xgb_model=model,
             name="model",
             model_format="json",
+            input_example=input_example,
         )
 
     elif model_type in {"logistic_regression", "svm"}:
@@ -318,6 +328,7 @@ def log_mlflow_model(
             sk_model=model,
             name="model",
             serialization_format="cloudpickle",
+            input_example=input_example,
         )
 
     else:
