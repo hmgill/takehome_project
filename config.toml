@@ -20,6 +20,7 @@ model_selection = "output/model_selection"
 shap = "output/shap"
 mlflow = "output/mlflow"
 temp = "output/tmp"
+splits = "output/splits"
 
 [qc]
 expected_height = 28
@@ -30,6 +31,20 @@ low_variance_quantile = 0.01
 cv_folds = 3
 search_iterations = 8
 threshold_method = "youden_j"
+
+[splits]
+# Pool the official train/val/test arrays, remove exact duplicate images,
+# then re-split with a seeded stratified split. Set deduplicate = false to
+# use the official MedMNIST splits unchanged (benchmark comparability).
+deduplicate = true
+# "drop": remove every copy of a duplicate group whose labels disagree.
+# "keep_first": keep the first copy and its label.
+label_conflict_policy = "drop"
+# true: val/test sizes follow the official split proportions.
+# false: use val_fraction and test_fraction below.
+preserve_source_proportions = true
+val_fraction = 0.1
+test_fraction = 0.1
 
 [mlflow]
 baseline_experiment = "pneumoniamnist"

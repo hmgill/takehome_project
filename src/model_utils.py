@@ -21,13 +21,15 @@ from sklearn.metrics import (
     roc_curve,
 )
 
-from project_config import CONFIG
-from utils import flatten_images, get_split_arrays
+from data_splits import load_dataset_splits, save_split_manifest
+from project_config import CONFIG, PATHS
+from utils import flatten_images
 
 
 def load_model_data(
     dataset_path: Path,
     augment_train: bool = False,
+    manifest_dir: Path | None = None,
 ) -> tuple[
     np.ndarray,
     np.ndarray,
@@ -37,31 +39,25 @@ def load_model_data(
     np.ndarray,
 ]:
     """
-    Load and flatten the official train, validation, and test splits.
+    Load, deduplicate, split, and flatten the dataset for training.
 
-    Optional augmentation is applied only to the training split.
-    Validation and test arrays are always left unchanged.
+    Exact duplicate images are removed from the pooled dataset *before*
+    the train/val/test split (see ``data_splits``), so no image can occur
+    in more than one split. The resulting split assignment is written to
+    ``manifest_dir`` (default ``PATHS.splits_dir``) for auditing.
+
+    Optional augmentation is applied only to the training split, after
+    splitting. Validation and test arrays are always left unchanged.
     """
 
-    if not dataset_path.exists():
-        raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+    splits = load_dataset_splits(dataset_path)
 
-    with np.load(
-        dataset_path,
-        allow_pickle=False,
-    ) as dataset:
-        train_images, y_train = get_split_arrays(
-            dataset,
-            "train",
-        )
-        val_images, y_val = get_split_arrays(
-            dataset,
-            "val",
-        )
-        test_images, y_test = get_split_arrays(
-            dataset,
-            "test",
-        )
+    save_split_manifest(
+        splits,
+        PATHS.splits_dir if manifest_dir is None else manifest_dir,
+    )
+
+    train_images, y_train = splits.train.images, splits.train.labels
 
     if augment_train:
         from augmentation_utils import augment_training_split
@@ -82,10 +78,10 @@ def load_model_data(
     return (
         flatten_images(train_images),
         y_train,
-        flatten_images(val_images),
-        y_val,
-        flatten_images(test_images),
-        y_test,
+        flatten_images(splits.val.images),
+        splits.val.labels,
+        flatten_images(splits.test.images),
+        splits.test.labels,
     )
 
 

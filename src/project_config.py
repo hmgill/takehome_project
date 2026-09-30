@@ -52,6 +52,7 @@ class PathSettings:
     shap_dir: Path
     mlflow_dir: Path
     temp_dir: Path
+    splits_dir: Path
 
     def log_file(self, name: str) -> Path:
         return self.logs_dir / f"{name}.log"
@@ -113,6 +114,15 @@ class ModelingSettings:
 
 
 @dataclass(frozen=True)
+class SplitSettings:
+    deduplicate: bool
+    label_conflict_policy: str
+    preserve_source_proportions: bool
+    val_fraction: float
+    test_fraction: float
+
+
+@dataclass(frozen=True)
 class MLflowSettings:
     baseline_experiment: str
     experiments_experiment: str
@@ -142,6 +152,7 @@ class AppConfig:
     paths: PathSettings
     qc: QCSettings
     modeling: ModelingSettings
+    splits: SplitSettings
     mlflow: MLflowSettings
     shap: ShapSettings
     augmentation: AugmentationSettings
@@ -203,6 +214,11 @@ def load_config(
         "modeling",
     )
 
+    splits = _require_section(
+        raw,
+        "splits",
+    )
+
     mlflow = _require_section(
         raw,
         "mlflow",
@@ -227,9 +243,7 @@ def load_config(
         paths=PathSettings(
             data_dir=_resolve_path(paths["data_dir"]),
             output_dir=_resolve_path(paths["output_dir"]),
-            dataset=_resolve_path(
-                os.environ.get(DATASET_ENV_VAR) or paths["dataset"]
-            ),
+            dataset=_resolve_path(os.environ.get(DATASET_ENV_VAR) or paths["dataset"]),
             database=_resolve_path(paths["database"]),
             metadata_csv=_resolve_path(paths["metadata_csv"]),
             analysis_sql=_resolve_path(paths["analysis_sql"]),
@@ -241,6 +255,7 @@ def load_config(
             shap_dir=_resolve_path(outputs["shap"]),
             mlflow_dir=_resolve_path(outputs["mlflow"]),
             temp_dir=_resolve_path(outputs["temp"]),
+            splits_dir=_resolve_path(outputs["splits"]),
         ),
         qc=QCSettings(
             expected_height=int(qc["expected_height"]),
@@ -251,6 +266,13 @@ def load_config(
             cv_folds=int(modeling["cv_folds"]),
             search_iterations=int(modeling["search_iterations"]),
             threshold_method=str(modeling["threshold_method"]),
+        ),
+        splits=SplitSettings(
+            deduplicate=bool(splits["deduplicate"]),
+            label_conflict_policy=str(splits["label_conflict_policy"]),
+            preserve_source_proportions=bool(splits["preserve_source_proportions"]),
+            val_fraction=float(splits["val_fraction"]),
+            test_fraction=float(splits["test_fraction"]),
         ),
         mlflow=MLflowSettings(
             baseline_experiment=str(mlflow["baseline_experiment"]),
@@ -292,6 +314,7 @@ def ensure_output_directories(
         paths.shap_dir,
         paths.mlflow_dir,
         paths.temp_dir,
+        paths.splits_dir,
     ]
 
     for model_name in (
