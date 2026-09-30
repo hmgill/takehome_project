@@ -40,6 +40,9 @@ output/
 │   ├── logistic/
 │   └── xgboost/
 ├── mlflow/
+├── splits/
+│   ├── split_manifest.csv
+│   └── split_report.json
 └── tmp/
 ```
 
@@ -55,6 +58,33 @@ data/
 The NPZ itself is user-supplied and lives outside the project; set
 `PNEUMONIAMNIST_NPZ` to its path. Everything in `data/` and `output/` is
 derived from the dataset and is excluded from git and the Docker image.
+
+## Deduplication and splitting
+
+All training and evaluation scripts (`model.py`, `model_svm.py`,
+`model_xgboost.py`, `select_best_model.py`, `create_predictions.py`, and
+the SHAP background in `explain_shap.py`) load data through
+`src/data_splits.py`. With `[splits].deduplicate = true` (default):
+
+1. the official train/val/test arrays are pooled;
+2. exact duplicate images (SHA-256 of dtype, shape and pixels) are
+   collapsed to their first occurrence;
+3. duplicate groups with conflicting labels are dropped entirely
+   (`label_conflict_policy = "drop"`) or keep their first copy
+   (`"keep_first"`);
+4. the unique images are re-split with a seeded stratified split whose
+   proportions match the official splits by default.
+
+No image can therefore appear twice in a split or in more than one split.
+Training writes `output/splits/split_manifest.csv` (assigned split plus
+source split/index and hash for every retained image) and
+`split_report.json` (counts and a split fingerprint). Prediction CSVs
+report the assigned `split` plus `source_split`/`source_index`, which
+join to `main.image_metadata` in DuckDB.
+
+Because the partition differs from the official MedMNIST splits, metrics
+are not directly comparable to published benchmarks. Set
+`deduplicate = false` to reproduce the official splits.
 
 ## Augmentation
 

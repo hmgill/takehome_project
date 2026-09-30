@@ -15,7 +15,8 @@ from sklearn.metrics import roc_auc_score
 from logging_utils import configure_logging
 from project_config import CONFIG, PATHS, ensure_output_directories
 from model_utils import evaluate_scores
-from utils import flatten_images, get_split_arrays
+from data_splits import load_dataset_splits
+from utils import flatten_images
 
 MODEL_CONFIG = {
     "logistic": {
@@ -158,19 +159,11 @@ def run_selection(
         exist_ok=True,
     )
 
-    if not dataset_path.exists():
-        raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+    # Same deduplicated partition the models were trained on.
+    splits = load_dataset_splits(dataset_path)
 
-    with np.load(
-        dataset_path,
-        allow_pickle=False,
-    ) as dataset:
-        val_images, y_val = get_split_arrays(
-            dataset,
-            "val",
-        )
-
-    X_val = flatten_images(val_images)
+    X_val = flatten_images(splits.val.images)
+    y_val = splits.val.labels
 
     candidates = []
 

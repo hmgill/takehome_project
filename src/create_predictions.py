@@ -14,7 +14,8 @@ from loguru import logger
 from logging_utils import configure_logging
 from project_config import CONFIG, PATHS, ensure_output_directories
 from model_utils import load_model_provenance
-from utils import flatten_images, get_split_arrays
+from data_splits import SplitData, load_dataset_splits
+from utils import flatten_images
 
 MODEL_CONFIG = {
     "logistic": {
@@ -74,34 +75,34 @@ def parse_model_names(value: str) -> list[str]:
 def load_split(
     dataset_path: Path,
     split: str,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Load and flatten one official NPZ split."""
+) -> tuple[np.ndarray, np.ndarray, SplitData]:
+    """
+    Load and flatten one split of the shared deduplicated partition.
 
-    if not dataset_path.exists():
-        raise FileNotFoundError(f"Dataset not found: {dataset_path}")
+    Also returns the split's provenance so rows can be joined back to
+    DuckDB by their source (official split, index) coordinates.
+    """
 
-    with np.load(
-        dataset_path,
-        allow_pickle=False,
-    ) as dataset:
-        images, labels = get_split_arrays(
-            dataset,
-            split,
-        )
+    data = load_dataset_splits(dataset_path).get(split)
 
     return (
-        flatten_images(images),
-        labels,
+        flatten_images(data.images),
+        data.labels,
+        data,
     )
 
 
 def load_metadata(
     database_path: Path,
     split: str,
-    expected_count: int,
+    split_data: SplitData,
 ) -> pd.DataFrame:
     """
-    Retrieve image IDs and source indices for a split from DuckDB.
+    Retrieve image IDs for the records in one assigned split.
+
+    Rows are returned in the same order as ``split_data``. ``split`` is
+    the assigned (deduplicated) split; ``source_split`` and
+    ``source_index`` locate the image in the official NPZ and DuckDB.
     """
 
     if not database_path.exists():
@@ -114,40 +115,47 @@ def load_metadata(
             "threads": 1,
         },
     ) as connection:
-        metadata = connection.execute(
-            """
+        database = connection.execute("""
             SELECT
                 CAST(image_id AS VARCHAR) AS image_id,
-                split,
-                split_index,
-                label
+                split AS source_split,
+                split_index AS source_index,
+                label,
+                image_hash
             FROM main.image_metadata
-            WHERE split = ?
-            ORDER BY split_index
-            """,
-            [split],
-        ).fetchdf()
+            """).fetchdf()
 
-    if len(metadata) != expected_count:
+    wanted = pd.DataFrame(
+        {
+            "source_split": split_data.source_split.astype(str),
+            "source_index": split_data.source_index,
+            "expected_hash": split_data.image_hash,
+        }
+    )
+
+    metadata = wanted.merge(
+        database,
+        on=["source_split", "source_index"],
+        how="left",
+        validate="one_to_one",
+    )
+
+    if metadata["image_id"].isna().any():
+        missing = int(metadata["image_id"].isna().sum())
         raise RuntimeError(
-            f"DuckDB contains {len(metadata)} '{split}' rows, "
-            f"but the NPZ contains {expected_count}."
+            f"{missing} '{split}' images have no DuckDB metadata row. "
+            "Rebuild the database from the same NPZ."
         )
 
-    expected_indices = np.arange(expected_count)
-
-    actual_indices = metadata["split_index"].to_numpy()
-
-    if not np.array_equal(
-        actual_indices,
-        expected_indices,
-    ):
+    if not (metadata["image_hash"] == metadata["expected_hash"]).all():
         raise RuntimeError(
-            f"DuckDB split_index values for '{split}' "
-            "do not align with the NPZ array."
+            "DuckDB image hashes do not match the NPZ. "
+            "Rebuild the database from the same NPZ."
         )
 
-    return metadata
+    metadata.insert(1, "split", split)
+
+    return metadata.drop(columns=["expected_hash", "image_hash"])
 
 
 def load_threshold(
@@ -285,7 +293,8 @@ def create_prediction_table(
         [
             "image_id",
             "split",
-            "split_index",
+            "source_split",
+            "source_index",
             "label",
             "true_class",
             "model",
@@ -322,7 +331,7 @@ def run_predictions(
         exist_ok=True,
     )
 
-    X, y_true = load_split(
+    X, y_true, split_data = load_split(
         dataset_path=dataset_path,
         split=split,
     )
@@ -330,7 +339,7 @@ def run_predictions(
     metadata = load_metadata(
         database_path=database_path,
         split=split,
-        expected_count=len(y_true),
+        split_data=split_data,
     )
 
     generated = 0
@@ -420,7 +429,7 @@ def parse_args() -> argparse.Namespace:
             "test",
         ],
         default="test",
-        help="Dataset split to score (default: test)",
+        help="Deduplicated split to score (default: test)",
     )
 
     parser.add_argument(

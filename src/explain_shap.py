@@ -24,7 +24,8 @@ from model_utils import (
     get_mlflow_run_provenance,
     load_model_provenance,
 )
-from utils import flatten_images, get_image_from_npz, get_split_arrays
+from data_splits import load_dataset_splits
+from utils import flatten_images, get_image_from_npz
 
 MODEL_FILES = {
     "logistic": PATHS.model_file("logistic"),
@@ -260,16 +261,8 @@ def get_background_data(
 
     rng = np.random.default_rng(42)
 
-    with np.load(
-        dataset_path,
-        allow_pickle=False,
-    ) as dataset:
-        train_images, _ = get_split_arrays(
-            dataset,
-            "train",
-        )
-
-    X_train = flatten_images(train_images)
+    # Background comes from the deduplicated training split.
+    X_train = flatten_images(load_dataset_splits(dataset_path).train.images)
 
     sample_size = min(
         background_size,
