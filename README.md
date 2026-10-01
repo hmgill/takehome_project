@@ -29,7 +29,7 @@ Windows Command Prompt:
 docker run --rm -p 8501:8501 ^
   -v "C:\path\to\pneumoniamnist.npz:/input/pneumoniamnist.npz:ro" ^
   -v "%cd%\output:/app/output" ^
-  hmgill/pneumoniamnist-explorer:1.3.1
+  hmgill/pneumoniamnist-explorer:1.4.0
 ```
 
 For PowerShell, use `` ` `` for line continuation. On macOS/Linux, use `\`.
@@ -42,7 +42,7 @@ A few useful variations:
 |---|---|
 | Leave no generated output on the host | Remove the `output` mount |
 | Force every pipeline step to rerun | Append `python src/run_all.py --force` |
-| Run the test suite | `docker run --rm hmgill/pneumoniamnist-explorer:1.3.1 python -m pytest -q` |
+| Run the test suite | `docker run --rm hmgill/pneumoniamnist-explorer:1.4.0 python -m pytest -q` |
 
 ---
 
@@ -74,7 +74,7 @@ Open <http://localhost:8501>. Generated results are written to `./output`.
 | Stop the stack | `docker compose down` |
 | Stop and delete the database volume | `docker compose down -v` |
 | Run one script | `docker compose run --rm explorer python src/model.py` |
-| Use the Docker Hub image instead of building | Add `IMAGE=hmgill/pneumoniamnist-explorer:1.3.1` to `.env`, then run `docker compose pull` and `docker compose up --no-build` |
+| Use the Docker Hub image instead of building | Add `IMAGE=hmgill/pneumoniamnist-explorer:1.4.0` to `.env`, then run `docker compose pull` and `docker compose up --no-build` |
 
 One Docker-specific detail: paths passed to scripts inside the container should use the container path `/input/pneumoniamnist.npz`, not the path on your host machine.
 
@@ -124,11 +124,11 @@ Every script supports `--help`. Most also accept `--log-level` and `--log-file`.
 
 | Script | What it does | Useful options |
 |---|---|---|
-| `src/run_all.py` | Runs steps 1–4, skips outputs that already exist, then starts the app | `--force`, `--no-app` |
+| `src/run_all.py` | Runs the pipeline (also training the model set in `[app].model` if it isn't the baseline), skips outputs that already exist, re-scores the catalog if the model changed, then starts the app | `--force`, `--no-app` |
 | `src/build_database.py` | Validates the NPZ and builds the metadata database | `--input`, `--output`, `--csv-output` |
 | `src/analyze.py` | Runs the SQL analysis and writes QC outputs | `--database`, `--dataset`, `--sql`, `--output-dir` |
-| `src/model.py` | Trains and evaluates the logistic-regression baseline | `--dataset`, `--output-dir`, `--augment`, `--mlflow`, `--mlflow-dir` |
-| `src/image_pipeline.py` | Ingests images into the app catalog and classifies them | `--npz PATH` or `--directory PATH`, `--database`, `--retry-failed`, `--metadata-only` |
+| `src/model.py` | Tunes, trains and evaluates the logistic-regression baseline | `--cv`, `--cv-folds`, `--n-iter`, `--augment`, `--mlflow`, `--mlflow-dir` |
+| `src/image_pipeline.py` | Ingests images into the app catalog and classifies them, or re-scores the catalog with another model | `--npz PATH`, `--directory PATH` or `--rescore`; `--model`, `--database`, `--retry-failed`, `--metadata-only` |
 | `app.py` | Starts the Streamlit explorer with `python -m streamlit run app.py` | — |
 
 ### Optional modeling and explanation scripts
@@ -169,7 +169,7 @@ The tracked runs include model parameters, evaluation metrics, saved artifacts, 
 
 ### Compare classifier models
 
-The required baseline is logistic regression, but the repo also includes RBF-SVM and XGBoost experiments:
+The required baseline is logistic regression, but the repo also includes RBF-SVM and XGBoost experiments. All three are tuned the same way: the same seeded randomized search (`[modeling].search_iterations` settings), scored by ROC AUC, then refit on the training split only. The validation split then picks the decision threshold, and the test split is scored once.
 
 ```bash
 python src/model.py
@@ -182,7 +182,54 @@ python src/select_best_model.py
 
 Model selection is based on held-out validation ROC AUC. The test split is not used to choose the model.
 
+#### Holdout tuning (default) or k-fold cross-validation
+
+By default each candidate setting is fit on the training split and scored on the validation split, a plain train/val/test holdout. With about 5,800 images, that is enough for a stable estimate and keeps runs fast.
+
+To score each setting by stratified k-fold CV inside the training split instead, set `[modeling].cross_validation = true` in `config.toml` (folds from `cv_folds`), or pass `--cv` to any of the three scripts:
+
+```bash
+python src/model.py --cv --cv-folds 5
+python src/model_svm.py --cv
+python src/model_xgboost.py --cv
+```
+
+Use the same mode for every candidate before running `select_best_model.py` so they're compared like for like. Each model's metrics CSV records `tuning_roc_auc` (plus `training_cv_roc_auc` in CV mode), and MLflow records the `tuning_method`.
+
 This is also a useful place to look at whether a more flexible classifier is actually buying much over the simple baseline, rather than assuming that the more complicated model will be better.
+
+### Choose the model the app uses
+
+The image catalog and Streamlit app classify with logistic regression by default. To use another trained model, set `[app].model` in `config.toml` or the `IMAGE_EXPLORER_MODEL` environment variable:
+
+| Value | Model |
+|---|---|
+| `logistic` | Logistic-regression baseline (default) |
+| `svm` | RBF SVM |
+| `xgboost` | XGBoost |
+| `best` | Whichever model `select_best_model.py` selected |
+
+```bash
+export IMAGE_EXPLORER_MODEL=xgboost
+python src/run_all.py           # trains it if needed, re-scores the catalog, starts the app
+```
+
+Or, step by step:
+
+```bash
+python src/model_xgboost.py
+python src/image_pipeline.py --rescore --model xgboost
+IMAGE_EXPLORER_MODEL=xgboost python -m streamlit run app.py
+```
+
+`--rescore` re-predicts stored features with the selected model without re-reading any image, and only touches predictions that came from a different model. The app shows which model is active and offers a **Re-score** button if any stored predictions came from another model. The Model metrics tab only counts predictions from the active model.
+
+Notes:
+
+- The SVM is trained without probability estimates. Its margin and threshold are mapped through a sigmoid so its scores sit on the same 0–1 scale as the others, with identical decisions. Treat its score as a ranking, not a calibrated probability.
+- The SHAP overlay is exact for logistic regression (linear SHAP) and XGBoost (TreeSHAP). It isn't available for the SVM, which has no exact, fast explainer.
+
+With Docker, pass the variable through: `docker run -e IMAGE_EXPLORER_MODEL=xgboost ...`, or add `IMAGE_EXPLORER_MODEL=xgboost` to `.env` for Compose.
 
 ### Export per-image predictions
 
@@ -235,6 +282,7 @@ Most settings live in `config.toml`. These environment variables can override th
 |---|---|---|
 | `PNEUMONIAMNIST_NPZ` | Dataset path used by the scripts | `data/pneumoniamnist.npz` |
 | `IMAGE_CATALOG_DB` | App catalog database | `data/image_catalog.sqlite3` |
+| `IMAGE_EXPLORER_MODEL` | Model the catalog and app classify with: `logistic`, `svm`, `xgboost` or `best` | `[app].model` (`logistic`) |
 | `IMAGE_EXPLORER_LOCAL_IMPORT` | Set to `1` to show server-side import controls in the app | off locally, on in Docker |
 | `NPZ_PATH` | Compose: host path to the NPZ | required |
 | `OUTPUT_DIR` | Compose: host folder for generated results | `./output` |

@@ -69,6 +69,17 @@ def load_training_cv_auc(
     return float(metrics.iloc[0]["training_cv_roc_auc"])
 
 
+def load_metric(metrics_path: Path, column: str) -> float:
+    """One numeric field from a model's metrics CSV, NaN when absent."""
+
+    if not metrics_path.exists():
+        return float("nan")
+    metrics = pd.read_csv(metrics_path)
+    if metrics.empty or column not in metrics.columns:
+        return float("nan")
+    return float(metrics.iloc[0][column])
+
+
 def prediction_scores(
     model,
     model_name: str,
@@ -134,6 +145,7 @@ def evaluate_candidate(
         "model_path": str(model_path),
         "threshold": threshold,
         "training_cv_roc_auc": load_training_cv_auc(metrics_path),
+        "tuning_roc_auc": load_metric(metrics_path, "tuning_roc_auc"),
         "validation_roc_auc": validation_auc,
         "validation_accuracy": threshold_metrics["accuracy"],
         "validation_balanced_accuracy": threshold_metrics["balanced_accuracy"],
@@ -235,9 +247,10 @@ def run_selection(
         "decision_threshold": float(selected["threshold"]),
         "selection_rule": (
             "Highest ROC AUC on the held-out validation split. "
-            "Training-fold cross-validation is used for hyperparameter "
-            "tuning where applicable; test performance is not used for "
-            "model selection."
+            "Hyperparameters are tuned on the validation split by default, "
+            "or by k-fold cross-validation inside the training split when "
+            "[modeling].cross_validation is on; test performance is not "
+            "used for model selection."
         ),
     }
 

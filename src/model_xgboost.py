@@ -10,7 +10,6 @@ import sklearn
 import xgboost
 from loguru import logger
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
 from xgboost import XGBClassifier
 
 from logging_utils import configure_logging
@@ -26,6 +25,8 @@ from model_utils import (
     save_model_provenance,
     save_search_results,
     select_threshold,
+    tune_and_fit,
+    tuning_metrics,
 )
 
 
@@ -36,8 +37,8 @@ def xgboost_roc_auc_scorer(estimator: XGBClassifier, X, y) -> float:
     return float(roc_auc_score(y, probabilities))
 
 
-def create_search(n_iter: int, cv_folds: int) -> RandomizedSearchCV:
-    """Create a modest CPU-only XGBoost randomized search."""
+def create_estimator():
+    """CPU-only XGBoost classifier, searched by tune_and_fit."""
 
     model = XGBClassifier(
         objective="binary:logistic",
@@ -49,39 +50,24 @@ def create_search(n_iter: int, cv_folds: int) -> RandomizedSearchCV:
         verbosity=0,
     )
 
-    parameters = {
-        "n_estimators": [100, 200, 300],
-        "max_depth": [2, 3, 4, 6],
-        "learning_rate": [0.03, 0.05, 0.1, 0.2],
-        "subsample": [0.7, 0.85, 1.0],
-        "colsample_bytree": [0.7, 0.85, 1.0],
-        "min_child_weight": [1, 3, 5],
-    }
+    return model
 
-    cross_validation = StratifiedKFold(
-        n_splits=cv_folds,
-        shuffle=True,
-        random_state=CONFIG.project.random_seed,
-    )
 
-    return RandomizedSearchCV(
-        estimator=model,
-        param_distributions=parameters,
-        n_iter=n_iter,
-        scoring=xgboost_roc_auc_scorer,
-        cv=cross_validation,
-        refit=True,
-        n_jobs=1,
-        random_state=CONFIG.project.random_seed,
-        return_train_score=False,
-        error_score="raise",
-    )
+SEARCH_PARAMETERS = {
+    "n_estimators": [100, 200, 300],
+    "max_depth": [2, 3, 4, 6],
+    "learning_rate": [0.03, 0.05, 0.1, 0.2],
+    "subsample": [0.7, 0.85, 1.0],
+    "colsample_bytree": [0.7, 0.85, 1.0],
+    "min_child_weight": [1, 3, 5],
+}
 
 
 def run_experiment(
     dataset_path: Path,
     output_dir: Path,
     n_iter: int,
+    use_cv: bool,
     cv_folds: int,
     use_mlflow: bool,
     mlflow_dir: Path,
@@ -105,14 +91,6 @@ def run_experiment(
         augment_train=use_augmentation,
     )
 
-    logger.info(
-        "Training XGBoost using {} randomized parameter combinations and {}-fold CV",
-        n_iter,
-        cv_folds,
-    )
-
-    search = create_search(n_iter=n_iter, cv_folds=cv_folds)
-
     with get_mlflow_context(
         enabled=use_mlflow,
         tracking_dir=mlflow_dir,
@@ -122,17 +100,26 @@ def run_experiment(
         if active_run is not None:
             logger.info("MLflow run ID: {}", active_run.info.run_id)
 
-        search.fit(X_train, y_train)
-        logger.success("XGBoost hyperparameter search complete")
-        logger.info("Best training CV ROC AUC: {:.4f}", search.best_score_)
-        logger.info("Best parameters: {}", search.best_params_)
+        tuning = tune_and_fit(
+            create_estimator(),
+            SEARCH_PARAMETERS,
+            X_train,
+            y_train,
+            X_val,
+            y_val,
+            n_iter=n_iter,
+            use_cv=use_cv,
+            cv_folds=cv_folds,
+            scoring=xgboost_roc_auc_scorer,
+        )
+        logger.success("XGBoost tuning complete")
 
         search_path = save_search_results(
-            search,
+            tuning.search,
             output_dir / "xgboost_search_results.csv",
         )
 
-        model = search.best_estimator_
+        model = tuning.model
         model_path = save_model(model, output_dir / "model.joblib")
 
         provenance_path = save_model_provenance(
@@ -149,7 +136,7 @@ def run_experiment(
         metrics, matrix = evaluate_scores(y_test, test_scores, threshold)
         metrics.update(
             {
-                "training_cv_roc_auc": float(search.best_score_),
+                **tuning_metrics(tuning, use_cv),
                 "validation_roc_auc": validation_auc,
                 "validation_youden_j": float(validation_j),
             }
@@ -176,14 +163,15 @@ def run_experiment(
                 "xgboost_version": xgboost.__version__,
                 "sklearn_version": sklearn.__version__,
                 "search_iterations": n_iter,
-                "cv_folds": cv_folds,
+                "tuning_method": tuning.method,
+                "cv_folds": cv_folds if use_cv else None,
                 "search_metric": "roc_auc",
                 "scorer": "custom_predict_proba_roc_auc",
                 "tree_method": "hist",
                 "device": "cpu",
                 "threshold_method": "validation_youden_j",
                 "augmentation_enabled": use_augmentation,
-                **{f"best_{key}": value for key, value in search.best_params_.items()},
+                **{f"best_{key}": value for key, value in tuning.best_params.items()},
             },
             metrics=metrics,
             artifacts=output_paths,
@@ -206,7 +194,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset", type=Path, default=PATHS.dataset)
     parser.add_argument("--output-dir", type=Path, default=PATHS.model_dir("xgboost"))
     parser.add_argument("--n-iter", type=int, default=CONFIG.modeling.search_iterations)
-    parser.add_argument("--cv-folds", type=int, default=CONFIG.modeling.cv_folds)
+    parser.add_argument(
+        "--cv",
+        action=argparse.BooleanOptionalAction,
+        default=CONFIG.modeling.cross_validation,
+        help=(
+            "Tune with stratified k-fold CV inside the training split instead of "
+            "the default train -> validation holdout "
+            "(default from config.toml [modeling].cross_validation)"
+        ),
+    )
+    parser.add_argument(
+        "--cv-folds",
+        type=int,
+        default=CONFIG.modeling.cv_folds,
+        help="Number of folds when --cv is on",
+    )
     parser.add_argument(
         "--augment",
         action="store_true",
@@ -251,6 +254,7 @@ if __name__ == "__main__":
             dataset_path=args.dataset,
             output_dir=args.output_dir,
             n_iter=args.n_iter,
+            use_cv=args.cv,
             cv_folds=args.cv_folds,
             use_mlflow=args.mlflow,
             mlflow_dir=args.mlflow_dir,

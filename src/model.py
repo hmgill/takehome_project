@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 from loguru import logger
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -22,7 +23,10 @@ from model_utils import (
     save_evaluation_outputs,
     save_model,
     save_model_provenance,
+    save_search_results,
     select_threshold,
+    tune_and_fit,
+    tuning_metrics,
 )
 
 
@@ -44,14 +48,29 @@ def create_model() -> Pipeline:
     )
 
 
+# Tuned exactly like the SVM and XGBoost experiments (same sampler, seed,
+# iteration count and ROC AUC scoring) so the candidates compare like for
+# like. liblinear supports both penalties, and the fitted model stays
+# StandardScaler -> LogisticRegression, so the exact linear SHAP explainer
+# still applies.
+SEARCH_PARAMETERS = {
+    "classifier__C": [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0],
+    "classifier__penalty": ["l1", "l2"],
+    "classifier__class_weight": [None, "balanced"],
+}
+
+
 def run_model(
     dataset_path: Path,
     output_dir: Path,
+    n_iter: int,
+    use_cv: bool,
+    cv_folds: int,
     use_mlflow: bool,
     mlflow_dir: Path,
     use_augmentation: bool,
 ) -> None:
-    """Fit on train, choose threshold on validation, evaluate once on test."""
+    """Tune (holdout or k-fold CV), pick the threshold on validation, test once."""
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -71,8 +90,6 @@ def run_model(
     logger.info("Validation data: X={}, y={}", X_val.shape, y_val.shape)
     logger.info("Test data: X={}, y={}", X_test.shape, y_test.shape)
 
-    model = create_model()
-
     with get_mlflow_context(
         enabled=use_mlflow,
         tracking_dir=mlflow_dir,
@@ -82,16 +99,37 @@ def run_model(
         if active_run is not None:
             logger.info("MLflow run ID: {}", active_run.info.run_id)
 
-        logger.info("Fitting logistic regression baseline")
-        model.fit(X_train, y_train)
-        logger.success("Model training complete")
+        tuning = tune_and_fit(
+            create_model(),
+            SEARCH_PARAMETERS,
+            X_train,
+            y_train,
+            X_val,
+            y_val,
+            n_iter=n_iter,
+            use_cv=use_cv,
+            cv_folds=cv_folds,
+        )
+        logger.success("Logistic regression tuning complete")
+        search_path = save_search_results(
+            tuning.search,
+            output_dir / "model_search_results.csv",
+        )
+        model = tuning.model
 
         validation_scores = model.predict_proba(X_val)[:, 1]
         threshold, validation_j = select_threshold(y_val, validation_scores)
+        validation_auc = float(roc_auc_score(y_val, validation_scores))
 
         test_scores = model.predict_proba(X_test)[:, 1]
         metrics, matrix = evaluate_scores(y_test, test_scores, threshold)
-        metrics["validation_youden_j"] = float(validation_j)
+        metrics.update(
+            {
+                **tuning_metrics(tuning, use_cv),
+                "validation_roc_auc": validation_auc,
+                "validation_youden_j": float(validation_j),
+            }
+        )
 
         output_paths = save_evaluation_outputs(
             name="model",
@@ -111,7 +149,7 @@ def run_model(
             model_path=model_path,
             mlflow_enabled=use_mlflow,
         )
-        output_paths.extend([model_path, provenance_path])
+        output_paths.extend([search_path, model_path, provenance_path])
 
         logger.info(
             "Final test metrics:\n{}",
@@ -127,8 +165,13 @@ def run_model(
                 "solver": "liblinear",
                 "max_iter": 2000,
                 "random_state": CONFIG.project.random_seed,
+                "search_iterations": n_iter,
+                "tuning_method": tuning.method,
+                "cv_folds": cv_folds if use_cv else None,
+                "search_metric": "roc_auc",
                 "threshold_method": "validation_youden_j",
                 "augmentation_enabled": use_augmentation,
+                **{f"best_{key}": value for key, value in tuning.best_params.items()},
             },
             metrics=metrics,
             artifacts=output_paths,
@@ -153,6 +196,23 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--dataset", type=Path, default=PATHS.dataset)
     parser.add_argument("--output-dir", type=Path, default=PATHS.model_dir("logistic"))
+    parser.add_argument("--n-iter", type=int, default=CONFIG.modeling.search_iterations)
+    parser.add_argument(
+        "--cv",
+        action=argparse.BooleanOptionalAction,
+        default=CONFIG.modeling.cross_validation,
+        help=(
+            "Tune with stratified k-fold CV inside the training split instead of "
+            "the default train -> validation holdout "
+            "(default from config.toml [modeling].cross_validation)"
+        ),
+    )
+    parser.add_argument(
+        "--cv-folds",
+        type=int,
+        default=CONFIG.modeling.cv_folds,
+        help="Number of folds when --cv is on",
+    )
     parser.add_argument(
         "--mlflow",
         action=argparse.BooleanOptionalAction,
@@ -195,6 +255,9 @@ if __name__ == "__main__":
         run_model(
             dataset_path=args.dataset,
             output_dir=args.output_dir,
+            n_iter=args.n_iter,
+            use_cv=args.cv,
+            cv_folds=args.cv_folds,
             use_mlflow=args.mlflow,
             mlflow_dir=args.mlflow_dir,
             use_augmentation=args.augment,

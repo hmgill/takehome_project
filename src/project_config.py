@@ -108,6 +108,7 @@ class QCSettings:
 
 @dataclass(frozen=True)
 class ModelingSettings:
+    cross_validation: bool
     cv_folds: int
     search_iterations: int
     threshold_method: str
@@ -147,6 +148,18 @@ class AugmentationSettings:
     probability: float
 
 
+MODEL_NAMES = ("logistic", "svm", "xgboost")
+APP_MODEL_CHOICES = (*MODEL_NAMES, "best")
+APP_MODEL_ENV_VAR = "IMAGE_EXPLORER_MODEL"
+
+
+@dataclass(frozen=True)
+class ExplorerSettings:
+    """Which trained model the image catalog and Streamlit app use."""
+
+    model: str
+
+
 @dataclass(frozen=True)
 class AppConfig:
     project: ProjectSettings
@@ -157,6 +170,22 @@ class AppConfig:
     mlflow: MLflowSettings
     shap: ShapSettings
     augmentation: AugmentationSettings
+    app: ExplorerSettings
+
+
+def _app_model(raw: dict[str, Any]) -> str:
+    """[app].model, overridden by IMAGE_EXPLORER_MODEL. Defaults to logistic."""
+
+    section = raw.get("app", {})
+    if not isinstance(section, dict):
+        raise ValueError("Config section [app] must be a table")
+    value = os.environ.get(APP_MODEL_ENV_VAR) or section.get("model", "logistic")
+    value = str(value).strip().lower()
+    if value not in APP_MODEL_CHOICES:
+        raise ValueError(
+            f"Unknown app model {value!r}; expected one of {', '.join(APP_MODEL_CHOICES)}"
+        )
+    return value
 
 
 def _require_section(
@@ -264,6 +293,7 @@ def load_config(
             low_variance_quantile=float(qc["low_variance_quantile"]),
         ),
         modeling=ModelingSettings(
+            cross_validation=bool(modeling.get("cross_validation", False)),
             cv_folds=int(modeling["cv_folds"]),
             search_iterations=int(modeling["search_iterations"]),
             threshold_method=str(modeling["threshold_method"]),
@@ -294,6 +324,7 @@ def load_config(
             contrast_limit=float(augmentation["contrast_limit"]),
             probability=float(augmentation["probability"]),
         ),
+        app=ExplorerSettings(model=_app_model(raw)),
     )
 
 

@@ -299,27 +299,15 @@ def explain_xgboost_batch(
 ) -> np.ndarray:
     """
     Compute TreeSHAP values for one or more XGBoost inputs.
+
+    Uses XGBoost's built-in TreeSHAP; see tree_shap.tree_shap_values for why
+    shap.TreeExplainer is not used with the pinned versions.
     """
 
-    import shap
+    from tree_shap import tree_shap_values
 
-    explainer = shap.TreeExplainer(model)
-
-    explanation = explainer(X)
-
-    values = np.asarray(explanation.values)
-
-    if values.ndim == 2:
-        return values
-
-    if values.ndim == 3 and values.shape[-1] == 2:
-        return values[
-            :,
-            :,
-            1,
-        ]
-
-    raise RuntimeError("Unexpected XGBoost SHAP shape: " f"{values.shape}")
+    values, _ = tree_shap_values(model, X)
+    return values
 
 
 # ---------------------------------------------------------------------

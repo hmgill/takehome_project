@@ -32,6 +32,9 @@ from image_pipeline import (
     ingest_bytes,
     ingest_directory,
     ingest_npz,
+    rescore_catalog,
+    resolve_model_name,
+    stale_prediction_count,
 )
 from project_config import PATHS
 
@@ -445,8 +448,15 @@ def split_metrics(df):
     }, {"TP": tp, "FN": fn, "FP": fp, "TN": tn}
 
 
-def metrics_tab(df):
+def metrics_tab(df, model_version=None):
     labeled = df[df["outcome"] != "unlabeled"]
+    if model_version is not None:
+        # Never mix predictions from different models in one set of metrics.
+        stale = labeled["model_version"] != model_version
+        if stale.any():
+            st.caption(f"{int(stale.sum()):,} labeled images scored by another model are "
+                       "excluded. Re-score to include them.")
+        labeled = labeled[~stale]
     # Excluded copies duplicate images already counted in train/val/test;
     # external images are outside the partition. Neither belongs in these metrics.
     outside = ~labeled["split"].isin(MODEL_SPLITS)
@@ -629,12 +639,46 @@ def selected_card(record, idx, paths, con, classifier):
 database = Path(os.environ.get("IMAGE_CATALOG_DB", str(APP_DATABASE)))
 con = connect(database)
 try:
+    model_problem = None
     try:
         classifier = default_classifier()
-    except Exception:
-        classifier = None
+    except Exception as exc:
+        classifier, model_problem = None, str(exc)
     if classifier is None:
-        st.warning("No classifier loaded. Images will be cataloged without predictions.")
+        if model_problem is None:
+            try:
+                model_problem = f"No trained {resolve_model_name()} model was found."
+            except Exception as exc:
+                model_problem = str(exc)
+        st.warning(
+            f"No classifier loaded. {model_problem} "
+            "Images will be cataloged without predictions."
+        )
+    else:
+        name = getattr(classifier, "name", "logistic")
+        note = (" Scores are the SVM margin mapped through a sigmoid: they rank "
+                "images but are not calibrated probabilities."
+                if getattr(classifier, "score_kind", "probability") == "margin" else "")
+        st.caption(
+            f"Classifying with **{name}** · threshold {classifier.threshold:.3f} · "
+            f"model `{classifier.version[:10]}`. Change it with `[app].model` in "
+            f"config.toml or the `IMAGE_EXPLORER_MODEL` environment variable.{note}"
+        )
+        stale = stale_prediction_count(con, classifier)
+        if stale:
+            warn, act = st.columns([4, 1], vertical_alignment="center")
+            warn.warning(
+                f"{stale:,} images were classified by a different model. "
+                f"Re-score them so predictions, metrics and SHAP use {name}."
+            )
+            if act.button(f"Re-score with {name}", type="primary", **STRETCH):
+                with st.spinner("Re-scoring…"):
+                    st.session_state["rescore_report"] = rescore_catalog(con, classifier)
+                st.rerun()
+        report = st.session_state.pop("rescore_report", None)
+        if report:
+            st.success(f"Re-scored {report['rescored']:,} images with {name}"
+                       + (f"; {report['model_error']:,} failed." if report["model_error"] else "."))
 
     # --- Sidebar: uploads -------------------------------------------------
     with st.sidebar:
@@ -877,6 +921,7 @@ try:
     with metrics:
         use_filters = st.toggle("Apply current filters", key="metrics_filtered",
                                 help="Off: metrics use every labeled image in the catalog.")
-        metrics_tab(filtered if use_filters else data)
+        metrics_tab(filtered if use_filters else data,
+                    getattr(classifier, "version", None) if classifier is not None else None)
 finally:
     con.close()

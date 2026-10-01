@@ -94,6 +94,36 @@ Because the partition differs from the official MedMNIST splits, metrics
 are not directly comparable to published benchmarks. Set
 `deduplicate = false` to reproduce the official splits.
 
+## Hyperparameter tuning
+
+`model.py`, `model_svm.py` and `model_xgboost.py` share
+`model_utils.tune_and_fit`, so every candidate is tuned identically:
+the same seeded randomized search over `[modeling].search_iterations`
+settings, scored by ROC AUC.
+
+- `[modeling].cross_validation = false` (default): each setting is fit on
+  train and scored on validation (`PredefinedSplit`). The winning setting
+  is refit on **train only**, not train + validation.
+- `cross_validation = true` or `--cv`: each setting is scored by
+  stratified `cv_folds`-fold CV inside train; validation is not used for
+  tuning.
+
+Either way the validation split chooses the decision threshold (Youden's
+J) and `select_best_model.py` compares candidates by validation ROC AUC;
+the test split is scored once. In holdout mode validation also chose the
+hyperparameters, so validation scores are slightly optimistic; the test
+score stays unbiased.
+
+## Model used by the app
+
+`[app].model` (`logistic`, `svm`, `xgboost` or `best`), overridden by
+`IMAGE_EXPLORER_MODEL`, selects the classifier for `image_pipeline.py`
+and the Streamlit app. `best` reads
+`output/model_selection/selected_model.json`. Each prediction stores the
+`model_version` (SHA-256 of the model name, model file and metrics file),
+so `image_pipeline.py --rescore` and the app's Re-score button can update
+only predictions made by a different model.
+
 ## Augmentation
 
 Augmentation is disabled by default. `src/augmentation_utils.py` contains

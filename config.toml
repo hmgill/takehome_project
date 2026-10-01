@@ -28,6 +28,13 @@ expected_width = 28
 low_variance_quantile = 0.01
 
 [modeling]
+# Hyperparameter tuning for all three models (logistic, SVM, XGBoost):
+# false (default): each candidate is fit on train and scored on the
+#   validation split -- a plain train/val/test holdout.
+# true: candidates are scored by stratified k-fold CV inside the training
+#   split (cv_folds folds). Override per run with --cv / --no-cv.
+# Either way the final model is fit on train only and test is scored once.
+cross_validation = false
 cv_folds = 3
 search_iterations = 8
 threshold_method = "youden_j"
@@ -52,6 +59,14 @@ test_fraction = 0.1
 enabled = true
 baseline_experiment = "pneumoniamnist"
 experiments_experiment = "pneumoniamnist_experiments"
+
+[app]
+# Model used to classify images in the catalog and the Streamlit app:
+# "logistic", "svm", "xgboost", or "best" (the winner recorded by
+# src/select_best_model.py). Override per run with IMAGE_EXPLORER_MODEL.
+# After switching, run `python src/image_pipeline.py --rescore` (run_all.py
+# does this automatically) so stored predictions match the new model.
+model = "logistic"
 
 [shap]
 background_size = 100

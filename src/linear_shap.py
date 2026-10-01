@@ -15,7 +15,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from matplotlib.figure import Figure
 
-EXPLANATION_VERSION = "3.0"
+EXPLANATION_VERSION = "3.1"
 
 
 @dataclass(frozen=True)
@@ -183,15 +183,39 @@ def explanation_png(features, explanation):
 
 
 def explain_catalog_image(classifier, features, stored_version, stored_score):
-    """Reject stale predictions rather than overlay a different model's explanation."""
+    """Explain a cataloged image with the model that scored it.
+
+    Logistic regression -> exact linear SHAP; XGBoost -> exact TreeSHAP.
+    The SVM has no exact, fast explainer, so the overlay is unavailable for it.
+    Stale predictions are rejected rather than overlaid with a different
+    model's explanation.
+    """
     if stored_version != classifier.version:
         raise ValueError(
             "Stored prediction uses a different model. Re-ingest this image first."
         )
     X = np.frombuffer(features, dtype=np.float32).reshape(1, -1)
-    explanation = explain_linear(classifier.model, X)
+    model = classifier.model
+    if isinstance(model, Pipeline) and isinstance(
+        model.steps[-1][1], LogisticRegression
+    ):
+        explanation = explain_linear(model, X)
+    else:
+        from tree_shap import explain_tree, is_tree_model
+
+        if not is_tree_model(model):
+            raise ValueError(
+                f"SHAP overlay is not available for the {getattr(classifier, 'name', 'selected')} "
+                "model (no exact, fast explainer). Switch to logistic or xgboost to see it."
+            )
+        explanation = explain_tree(model, X)
+    fresh = (
+        classifier.scores(X)[0]
+        if hasattr(classifier, "scores")
+        else explanation.probability[0]
+    )
     if not np.isfinite(stored_score) or not np.isclose(
-        explanation.probability[0], stored_score, rtol=1e-7, atol=1e-8
+        fresh, stored_score, rtol=1e-7, atol=1e-8
     ):
         raise ValueError(
             "Stored prediction differs from current inference. Re-ingest this image first."

@@ -11,13 +11,15 @@ services:
     build: .
     # Local builds are tagged pneumoniamnist-explorer:latest. To use the
     # published image instead, set IMAGE (e.g. in .env) to
-    # hmgill/pneumoniamnist-explorer:1.3.1 and run `docker compose pull`
+    # hmgill/pneumoniamnist-explorer:1.4.0 and run `docker compose pull`
     # before the usual commands (use `docker compose up --no-build`).
     image: ${IMAGE:-pneumoniamnist-explorer:latest}
     ports:
       - "8501:8501"
     environment:
       PNEUMONIAMNIST_NPZ: /input/pneumoniamnist.npz
+      # logistic | svm | xgboost | best; empty falls back to config.toml [app].model
+      IMAGE_EXPLORER_MODEL: ${IMAGE_EXPLORER_MODEL:-}
     volumes:
       - type: bind
         source: ${NPZ_PATH:?Set NPZ_PATH to the full path of your pneumoniamnist.npz}

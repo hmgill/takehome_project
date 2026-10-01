@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from dataclasses import dataclass
 import json
 from pathlib import Path
 
@@ -20,6 +21,9 @@ from sklearn.metrics import (
     roc_auc_score,
     roc_curve,
 )
+
+from sklearn.base import clone
+from sklearn.model_selection import PredefinedSplit, RandomizedSearchCV, StratifiedKFold
 
 from data_splits import load_dataset_splits, save_split_manifest
 from project_config import CONFIG, PATHS
@@ -83,6 +87,97 @@ def load_model_data(
         flatten_images(splits.test.images),
         splits.test.labels,
     )
+
+
+@dataclass
+class TuningResult:
+    """Outcome of tune_and_fit. ``model`` is always fit on the training split only."""
+
+    model: object
+    search: RandomizedSearchCV
+    best_params: dict
+    tuning_score: float
+    method: str
+
+
+def tune_and_fit(
+    estimator,
+    parameters: dict,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    *,
+    n_iter: int,
+    use_cv: bool,
+    cv_folds: int,
+    scoring="roc_auc",
+) -> TuningResult:
+    """Randomized hyperparameter search shared by every model script.
+
+    use_cv=False (default): holdout tuning. Each sampled setting is fit on
+    the training split and scored on the validation split.
+    use_cv=True: each setting is scored by seeded, stratified k-fold CV
+    inside the training split; the validation split is not seen.
+
+    Both modes sample the same settings (same seed) and return a model fit
+    on the training split only, so the validation split can still choose
+    the decision threshold and the test split is never touched.
+    """
+
+    seed = CONFIG.project.random_seed
+
+    if use_cv:
+        splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed)
+        X_search, y_search, method = X_train, y_train, f"{cv_folds}-fold CV on train"
+    else:
+        # -1 = always in the fitting fold, 0 = the single scoring fold.
+        splitter = PredefinedSplit(
+            np.concatenate([np.full(len(y_train), -1), np.zeros(len(y_val), dtype=int)])
+        )
+        X_search = np.concatenate([X_train, X_val])
+        y_search = np.concatenate([y_train, y_val])
+        method = "holdout (train -> validation)"
+
+    search = RandomizedSearchCV(
+        estimator=estimator,
+        param_distributions=parameters,
+        n_iter=n_iter,
+        scoring=scoring,
+        cv=splitter,
+        # Holdout mode must not refit on train + validation.
+        refit=use_cv,
+        n_jobs=1,
+        random_state=seed,
+        return_train_score=False,
+        error_score="raise",
+    )
+    search.fit(X_search, y_search)
+
+    if use_cv:
+        model = search.best_estimator_
+    else:
+        model = clone(estimator).set_params(**search.best_params_).fit(X_train, y_train)
+
+    logger.info("Tuning: {}; best ROC AUC {:.4f}", method, search.best_score_)
+    logger.info("Best parameters: {}", search.best_params_)
+
+    return TuningResult(
+        model=model,
+        search=search,
+        best_params=dict(search.best_params_),
+        tuning_score=float(search.best_score_),
+        method=method,
+    )
+
+
+def tuning_metrics(result: TuningResult, use_cv: bool) -> dict[str, float]:
+    """Numeric tuning fields for the metrics CSV (also logged to MLflow)."""
+
+    metrics = {"tuning_roc_auc": result.tuning_score}
+    if use_cv:
+        metrics["training_cv_roc_auc"] = result.tuning_score
+    return metrics
 
 
 def select_threshold(

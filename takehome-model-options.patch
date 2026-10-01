@@ -1,0 +1,1848 @@
+diff --git a/CONFIG_AND_OUTPUTS.md b/CONFIG_AND_OUTPUTS.md
+index 0af1231..426a135 100644
+--- a/CONFIG_AND_OUTPUTS.md
++++ b/CONFIG_AND_OUTPUTS.md
+@@ -94,6 +94,36 @@ Because the partition differs from the official MedMNIST splits, metrics
+ are not directly comparable to published benchmarks. Set
+ `deduplicate = false` to reproduce the official splits.
+ 
++## Hyperparameter tuning
++
++`model.py`, `model_svm.py` and `model_xgboost.py` share
++`model_utils.tune_and_fit`, so every candidate is tuned identically:
++the same seeded randomized search over `[modeling].search_iterations`
++settings, scored by ROC AUC.
++
++- `[modeling].cross_validation = false` (default): each setting is fit on
++  train and scored on validation (`PredefinedSplit`). The winning setting
++  is refit on **train only**, not train + validation.
++- `cross_validation = true` or `--cv`: each setting is scored by
++  stratified `cv_folds`-fold CV inside train; validation is not used for
++  tuning.
++
++Either way the validation split chooses the decision threshold (Youden's
++J) and `select_best_model.py` compares candidates by validation ROC AUC;
++the test split is scored once. In holdout mode validation also chose the
++hyperparameters, so validation scores are slightly optimistic; the test
++score stays unbiased.
++
++## Model used by the app
++
++`[app].model` (`logistic`, `svm`, `xgboost` or `best`), overridden by
++`IMAGE_EXPLORER_MODEL`, selects the classifier for `image_pipeline.py`
++and the Streamlit app. `best` reads
++`output/model_selection/selected_model.json`. Each prediction stores the
++`model_version` (SHA-256 of the model name, model file and metrics file),
++so `image_pipeline.py --rescore` and the app's Re-score button can update
++only predictions made by a different model.
++
+ ## Augmentation
+ 
+ Augmentation is disabled by default. `src/augmentation_utils.py` contains
+diff --git a/README.md b/README.md
+index d996b32..586d1fd 100644
+--- a/README.md
++++ b/README.md
+@@ -29,7 +29,7 @@ Windows Command Prompt:
+ docker run --rm -p 8501:8501 ^
+   -v "C:\path\to\pneumoniamnist.npz:/input/pneumoniamnist.npz:ro" ^
+   -v "%cd%\output:/app/output" ^
+-  hmgill/pneumoniamnist-explorer:1.3.1
++  hmgill/pneumoniamnist-explorer:1.4.0
+ ```
+ 
+ For PowerShell, use `` ` `` for line continuation. On macOS/Linux, use `\`.
+@@ -42,7 +42,7 @@ A few useful variations:
+ |---|---|
+ | Leave no generated output on the host | Remove the `output` mount |
+ | Force every pipeline step to rerun | Append `python src/run_all.py --force` |
+-| Run the test suite | `docker run --rm hmgill/pneumoniamnist-explorer:1.3.1 python -m pytest -q` |
++| Run the test suite | `docker run --rm hmgill/pneumoniamnist-explorer:1.4.0 python -m pytest -q` |
+ 
+ ---
+ 
+@@ -74,7 +74,7 @@ Open <http://localhost:8501>. Generated results are written to `./output`.
+ | Stop the stack | `docker compose down` |
+ | Stop and delete the database volume | `docker compose down -v` |
+ | Run one script | `docker compose run --rm explorer python src/model.py` |
+-| Use the Docker Hub image instead of building | Add `IMAGE=hmgill/pneumoniamnist-explorer:1.3.1` to `.env`, then run `docker compose pull` and `docker compose up --no-build` |
++| Use the Docker Hub image instead of building | Add `IMAGE=hmgill/pneumoniamnist-explorer:1.4.0` to `.env`, then run `docker compose pull` and `docker compose up --no-build` |
+ 
+ One Docker-specific detail: paths passed to scripts inside the container should use the container path `/input/pneumoniamnist.npz`, not the path on your host machine.
+ 
+@@ -124,11 +124,11 @@ Every script supports `--help`. Most also accept `--log-level` and `--log-file`.
+ 
+ | Script | What it does | Useful options |
+ |---|---|---|
+-| `src/run_all.py` | Runs steps 1–4, skips outputs that already exist, then starts the app | `--force`, `--no-app` |
++| `src/run_all.py` | Runs the pipeline (also training the model set in `[app].model` if it isn't the baseline), skips outputs that already exist, re-scores the catalog if the model changed, then starts the app | `--force`, `--no-app` |
+ | `src/build_database.py` | Validates the NPZ and builds the metadata database | `--input`, `--output`, `--csv-output` |
+ | `src/analyze.py` | Runs the SQL analysis and writes QC outputs | `--database`, `--dataset`, `--sql`, `--output-dir` |
+-| `src/model.py` | Trains and evaluates the logistic-regression baseline | `--dataset`, `--output-dir`, `--augment`, `--mlflow`, `--mlflow-dir` |
+-| `src/image_pipeline.py` | Ingests images into the app catalog and classifies them | `--npz PATH` or `--directory PATH`, `--database`, `--retry-failed`, `--metadata-only` |
++| `src/model.py` | Tunes, trains and evaluates the logistic-regression baseline | `--cv`, `--cv-folds`, `--n-iter`, `--augment`, `--mlflow`, `--mlflow-dir` |
++| `src/image_pipeline.py` | Ingests images into the app catalog and classifies them, or re-scores the catalog with another model | `--npz PATH`, `--directory PATH` or `--rescore`; `--model`, `--database`, `--retry-failed`, `--metadata-only` |
+ | `app.py` | Starts the Streamlit explorer with `python -m streamlit run app.py` | — |
+ 
+ ### Optional modeling and explanation scripts
+@@ -169,7 +169,7 @@ The tracked runs include model parameters, evaluation metrics, saved artifacts,
+ 
+ ### Compare classifier models
+ 
+-The required baseline is logistic regression, but the repo also includes RBF-SVM and XGBoost experiments:
++The required baseline is logistic regression, but the repo also includes RBF-SVM and XGBoost experiments. All three are tuned the same way: the same seeded randomized search (`[modeling].search_iterations` settings), scored by ROC AUC, then refit on the training split only. The validation split then picks the decision threshold, and the test split is scored once.
+ 
+ ```bash
+ python src/model.py
+@@ -182,8 +182,55 @@ python src/select_best_model.py
+ 
+ Model selection is based on held-out validation ROC AUC. The test split is not used to choose the model.
+ 
++#### Holdout tuning (default) or k-fold cross-validation
++
++By default each candidate setting is fit on the training split and scored on the validation split, a plain train/val/test holdout. With about 5,800 images, that is enough for a stable estimate and keeps runs fast.
++
++To score each setting by stratified k-fold CV inside the training split instead, set `[modeling].cross_validation = true` in `config.toml` (folds from `cv_folds`), or pass `--cv` to any of the three scripts:
++
++```bash
++python src/model.py --cv --cv-folds 5
++python src/model_svm.py --cv
++python src/model_xgboost.py --cv
++```
++
++Use the same mode for every candidate before running `select_best_model.py` so they're compared like for like. Each model's metrics CSV records `tuning_roc_auc` (plus `training_cv_roc_auc` in CV mode), and MLflow records the `tuning_method`.
++
+ This is also a useful place to look at whether a more flexible classifier is actually buying much over the simple baseline, rather than assuming that the more complicated model will be better.
+ 
++### Choose the model the app uses
++
++The image catalog and Streamlit app classify with logistic regression by default. To use another trained model, set `[app].model` in `config.toml` or the `IMAGE_EXPLORER_MODEL` environment variable:
++
++| Value | Model |
++|---|---|
++| `logistic` | Logistic-regression baseline (default) |
++| `svm` | RBF SVM |
++| `xgboost` | XGBoost |
++| `best` | Whichever model `select_best_model.py` selected |
++
++```bash
++export IMAGE_EXPLORER_MODEL=xgboost
++python src/run_all.py           # trains it if needed, re-scores the catalog, starts the app
++```
++
++Or, step by step:
++
++```bash
++python src/model_xgboost.py
++python src/image_pipeline.py --rescore --model xgboost
++IMAGE_EXPLORER_MODEL=xgboost python -m streamlit run app.py
++```
++
++`--rescore` re-predicts stored features with the selected model without re-reading any image, and only touches predictions that came from a different model. The app shows which model is active and offers a **Re-score** button if any stored predictions came from another model. The Model metrics tab only counts predictions from the active model.
++
++Notes:
++
++- The SVM is trained without probability estimates. Its margin and threshold are mapped through a sigmoid so its scores sit on the same 0–1 scale as the others, with identical decisions. Treat its score as a ranking, not a calibrated probability.
++- The SHAP overlay is exact for logistic regression (linear SHAP) and XGBoost (TreeSHAP). It isn't available for the SVM, which has no exact, fast explainer.
++
++With Docker, pass the variable through: `docker run -e IMAGE_EXPLORER_MODEL=xgboost ...`, or add `IMAGE_EXPLORER_MODEL=xgboost` to `.env` for Compose.
++
+ ### Export per-image predictions
+ 
+ Once models have been trained, you can generate prediction tables for a closer look at false positives, false negatives, and disagreements between models:
+@@ -235,6 +282,7 @@ Most settings live in `config.toml`. These environment variables can override th
+ |---|---|---|
+ | `PNEUMONIAMNIST_NPZ` | Dataset path used by the scripts | `data/pneumoniamnist.npz` |
+ | `IMAGE_CATALOG_DB` | App catalog database | `data/image_catalog.sqlite3` |
++| `IMAGE_EXPLORER_MODEL` | Model the catalog and app classify with: `logistic`, `svm`, `xgboost` or `best` | `[app].model` (`logistic`) |
+ | `IMAGE_EXPLORER_LOCAL_IMPORT` | Set to `1` to show server-side import controls in the app | off locally, on in Docker |
+ | `NPZ_PATH` | Compose: host path to the NPZ | required |
+ | `OUTPUT_DIR` | Compose: host folder for generated results | `./output` |
+diff --git a/app.py b/app.py
+index af5ee24..9ed3cfd 100644
+--- a/app.py
++++ b/app.py
+@@ -32,6 +32,9 @@ from image_pipeline import (
+     ingest_bytes,
+     ingest_directory,
+     ingest_npz,
++    rescore_catalog,
++    resolve_model_name,
++    stale_prediction_count,
+ )
+ from project_config import PATHS
+ 
+@@ -445,8 +448,15 @@ def split_metrics(df):
+     }, {"TP": tp, "FN": fn, "FP": fp, "TN": tn}
+ 
+ 
+-def metrics_tab(df):
++def metrics_tab(df, model_version=None):
+     labeled = df[df["outcome"] != "unlabeled"]
++    if model_version is not None:
++        # Never mix predictions from different models in one set of metrics.
++        stale = labeled["model_version"] != model_version
++        if stale.any():
++            st.caption(f"{int(stale.sum()):,} labeled images scored by another model are "
++                       "excluded. Re-score to include them.")
++        labeled = labeled[~stale]
+     # Excluded copies duplicate images already counted in train/val/test;
+     # external images are outside the partition. Neither belongs in these metrics.
+     outside = ~labeled["split"].isin(MODEL_SPLITS)
+@@ -629,12 +639,46 @@ def selected_card(record, idx, paths, con, classifier):
+ database = Path(os.environ.get("IMAGE_CATALOG_DB", str(APP_DATABASE)))
+ con = connect(database)
+ try:
++    model_problem = None
+     try:
+         classifier = default_classifier()
+-    except Exception:
+-        classifier = None
++    except Exception as exc:
++        classifier, model_problem = None, str(exc)
+     if classifier is None:
+-        st.warning("No classifier loaded. Images will be cataloged without predictions.")
++        if model_problem is None:
++            try:
++                model_problem = f"No trained {resolve_model_name()} model was found."
++            except Exception as exc:
++                model_problem = str(exc)
++        st.warning(
++            f"No classifier loaded. {model_problem} "
++            "Images will be cataloged without predictions."
++        )
++    else:
++        name = getattr(classifier, "name", "logistic")
++        note = (" Scores are the SVM margin mapped through a sigmoid: they rank "
++                "images but are not calibrated probabilities."
++                if getattr(classifier, "score_kind", "probability") == "margin" else "")
++        st.caption(
++            f"Classifying with **{name}** · threshold {classifier.threshold:.3f} · "
++            f"model `{classifier.version[:10]}`. Change it with `[app].model` in "
++            f"config.toml or the `IMAGE_EXPLORER_MODEL` environment variable.{note}"
++        )
++        stale = stale_prediction_count(con, classifier)
++        if stale:
++            warn, act = st.columns([4, 1], vertical_alignment="center")
++            warn.warning(
++                f"{stale:,} images were classified by a different model. "
++                f"Re-score them so predictions, metrics and SHAP use {name}."
++            )
++            if act.button(f"Re-score with {name}", type="primary", **STRETCH):
++                with st.spinner("Re-scoring…"):
++                    st.session_state["rescore_report"] = rescore_catalog(con, classifier)
++                st.rerun()
++        report = st.session_state.pop("rescore_report", None)
++        if report:
++            st.success(f"Re-scored {report['rescored']:,} images with {name}"
++                       + (f"; {report['model_error']:,} failed." if report["model_error"] else "."))
+ 
+     # --- Sidebar: uploads -------------------------------------------------
+     with st.sidebar:
+@@ -877,6 +921,7 @@ try:
+     with metrics:
+         use_filters = st.toggle("Apply current filters", key="metrics_filtered",
+                                 help="Off: metrics use every labeled image in the catalog.")
+-        metrics_tab(filtered if use_filters else data)
++        metrics_tab(filtered if use_filters else data,
++                    getattr(classifier, "version", None) if classifier is not None else None)
+ finally:
+     con.close()
+\ No newline at end of file
+diff --git a/compose.yaml b/compose.yaml
+index 88c4562..c2af452 100644
+--- a/compose.yaml
++++ b/compose.yaml
+@@ -11,13 +11,15 @@ services:
+     build: .
+     # Local builds are tagged pneumoniamnist-explorer:latest. To use the
+     # published image instead, set IMAGE (e.g. in .env) to
+-    # hmgill/pneumoniamnist-explorer:1.3.1 and run `docker compose pull`
++    # hmgill/pneumoniamnist-explorer:1.4.0 and run `docker compose pull`
+     # before the usual commands (use `docker compose up --no-build`).
+     image: ${IMAGE:-pneumoniamnist-explorer:latest}
+     ports:
+       - "8501:8501"
+     environment:
+       PNEUMONIAMNIST_NPZ: /input/pneumoniamnist.npz
++      # logistic | svm | xgboost | best; empty falls back to config.toml [app].model
++      IMAGE_EXPLORER_MODEL: ${IMAGE_EXPLORER_MODEL:-}
+     volumes:
+       - type: bind
+         source: ${NPZ_PATH:?Set NPZ_PATH to the full path of your pneumoniamnist.npz}
+diff --git a/config.toml b/config.toml
+index b0a5092..80ff5fa 100644
+--- a/config.toml
++++ b/config.toml
+@@ -28,6 +28,13 @@ expected_width = 28
+ low_variance_quantile = 0.01
+ 
+ [modeling]
++# Hyperparameter tuning for all three models (logistic, SVM, XGBoost):
++# false (default): each candidate is fit on train and scored on the
++#   validation split -- a plain train/val/test holdout.
++# true: candidates are scored by stratified k-fold CV inside the training
++#   split (cv_folds folds). Override per run with --cv / --no-cv.
++# Either way the final model is fit on train only and test is scored once.
++cross_validation = false
+ cv_folds = 3
+ search_iterations = 8
+ threshold_method = "youden_j"
+@@ -53,6 +60,14 @@ enabled = true
+ baseline_experiment = "pneumoniamnist"
+ experiments_experiment = "pneumoniamnist_experiments"
+ 
++[app]
++# Model used to classify images in the catalog and the Streamlit app:
++# "logistic", "svm", "xgboost", or "best" (the winner recorded by
++# src/select_best_model.py). Override per run with IMAGE_EXPLORER_MODEL.
++# After switching, run `python src/image_pipeline.py --rescore` (run_all.py
++# does this automatically) so stored predictions match the new model.
++model = "logistic"
++
+ [shap]
+ background_size = 100
+ default_output_format = "png"
+diff --git a/src/explain_shap.py b/src/explain_shap.py
+index 4ae5b0e..fe8801f 100644
+--- a/src/explain_shap.py
++++ b/src/explain_shap.py
+@@ -299,27 +299,15 @@ def explain_xgboost_batch(
+ ) -> np.ndarray:
+     """
+     Compute TreeSHAP values for one or more XGBoost inputs.
+-    """
+-
+-    import shap
+-
+-    explainer = shap.TreeExplainer(model)
+-
+-    explanation = explainer(X)
+ 
+-    values = np.asarray(explanation.values)
+-
+-    if values.ndim == 2:
+-        return values
++    Uses XGBoost's built-in TreeSHAP; see tree_shap.tree_shap_values for why
++    shap.TreeExplainer is not used with the pinned versions.
++    """
+ 
+-    if values.ndim == 3 and values.shape[-1] == 2:
+-        return values[
+-            :,
+-            :,
+-            1,
+-        ]
++    from tree_shap import tree_shap_values
+ 
+-    raise RuntimeError("Unexpected XGBoost SHAP shape: " f"{values.shape}")
++    values, _ = tree_shap_values(model, X)
++    return values
+ 
+ 
+ # ---------------------------------------------------------------------
+diff --git a/src/image_pipeline.py b/src/image_pipeline.py
+index d1f29a9..7dcddf3 100644
+--- a/src/image_pipeline.py
++++ b/src/image_pipeline.py
+@@ -15,8 +15,9 @@ import joblib
+ import numpy as np
+ import pandas as pd
+ from PIL import Image, ImageOps
++from scipy.special import expit
+ 
+-from project_config import PATHS
++from project_config import CONFIG, MODEL_NAMES, PATHS
+ 
+ APP_DATABASE = PATHS.data_dir / "image_catalog.sqlite3"
+ MAX_FILE_BYTES = 25 * 1024 * 1024
+@@ -74,40 +75,115 @@ def connect(database=APP_DATABASE):
+ 
+ 
+ class Classifier:
+-    """Only loads the locally trained baseline; never accept uploaded joblib files."""
++    """Load one locally trained model; never accept uploaded joblib files.
++
++    Works with any binary model trained by this project. Models with
++    ``predict_proba`` (logistic regression, XGBoost) score in probability
++    space. The SVM is trained without probability estimates, so its
++    decision-function margin and its validation threshold are both mapped
++    through a sigmoid. That keeps every prediction on the same 0-1 scale for
++    the app without changing any decision (the map is monotonic), but the
++    SVM's score is an uncalibrated ranking score, not a probability.
++    """
+ 
+-    def __init__(self, model_path, metrics_path):
++    def __init__(self, model_path, metrics_path, name="logistic"):
+         model_path, metrics_path = Path(model_path), Path(metrics_path)
++        self.name = str(name)
+         self.model = joblib.load(model_path)
+-        self.threshold = float(pd.read_csv(metrics_path).iloc[0]["threshold"])
+-        if not 0 <= self.threshold <= 1:
+-            raise ValueError("Decision threshold must be a probability in [0, 1]")
+-        if list(self.model.classes_) != [0, 1] or self.model.n_features_in_ != 784:
++        threshold = float(pd.read_csv(metrics_path).iloc[0]["threshold"])
++        if list(getattr(self.model, "classes_", [])) != [0, 1] or getattr(
++            self.model, "n_features_in_", None
++        ) != 784:
+             raise ValueError(
+                 "Expected a binary PneumoniaMNIST model with 784 pixel features"
+             )
++        if hasattr(self.model, "predict_proba"):
++            self.score_kind = "probability"
++            if not 0 <= threshold <= 1:
++                raise ValueError("Decision threshold must be a probability in [0, 1]")
++        elif hasattr(self.model, "decision_function"):
++            self.score_kind = "margin"
++            if not np.isfinite(threshold):
++                raise ValueError("Decision threshold must be finite")
++        else:
++            raise ValueError("Model exposes neither predict_proba nor decision_function")
++        self.raw_threshold = threshold
++        self.threshold = threshold if self.score_kind == "probability" else float(
++            expit(threshold)
++        )
+         self.version = hashlib.sha256(
+-            model_path.read_bytes() + metrics_path.read_bytes()
++            self.name.encode() + model_path.read_bytes() + metrics_path.read_bytes()
+         ).hexdigest()
+ 
++    def raw_scores(self, X):
++        X = np.asarray(X, dtype=np.float32).reshape(-1, 784)
++        if self.score_kind == "probability":
++            return np.asarray(self.model.predict_proba(X)[:, 1], dtype=np.float64)
++        return np.asarray(self.model.decision_function(X), dtype=np.float64).reshape(-1)
++
++    def scores(self, X):
++        """Pneumonia scores on a 0-1 scale (see the class docstring)."""
++        raw = self.raw_scores(X)
++        return raw if self.score_kind == "probability" else expit(raw)
++
++    def predict_batch(self, X):
++        raw = self.raw_scores(X)
++        scores = raw if self.score_kind == "probability" else expit(raw)
++        if not np.isfinite(scores).all() or ((scores < 0) | (scores > 1)).any():
++            raise ValueError("Model returned an invalid score")
++        results = []
++        for value, score in zip(raw, scores):
++            positive = value >= self.raw_threshold
++            results.append(
++                {
++                    "predicted_class": "pneumonia" if positive else "normal",
++                    "confidence": float(score if positive else 1 - score),
++                    "pneumonia_score": float(score),
++                    "model_version": self.version,
++                }
++            )
++        return results
++
+     def predict(self, features):
+-        score = float(self.model.predict_proba(features.reshape(1, -1))[0, 1])
+-        if not np.isfinite(score) or not 0 <= score <= 1:
+-            raise ValueError("Model returned an invalid probability")
+-        positive = score >= self.threshold
+-        return {
+-            "predicted_class": "pneumonia" if positive else "normal",
+-            "confidence": score if positive else 1 - score,
+-            "pneumonia_score": score,
+-            "model_version": self.version,
+-        }
+-
+-
+-def default_classifier():
+-    model = PATHS.model_file("logistic")
++        return self.predict_batch(np.asarray(features).reshape(1, -1))[0]
++
++
++def resolve_model_name(name=None):
++    """Explicit name, else IMAGE_EXPLORER_MODEL / config.toml [app].model.
++
++    "best" resolves to the model recorded by src/select_best_model.py.
++    """
++    name = str(name or CONFIG.app.model).strip().lower()
++    if name == "best":
++        manifest = PATHS.model_selection_dir / "selected_model.json"
++        if not manifest.exists():
++            raise FileNotFoundError(
++                "App model is 'best' but no model selection exists yet. "
++                "Run src/select_best_model.py after training the candidates."
++            )
++        name = str(json.loads(manifest.read_text())["selected_model"]).lower()
++    if name not in MODEL_NAMES:
++        raise ValueError(f"Unknown model {name!r}; expected one of {MODEL_NAMES}")
++    return name
++
++
++def load_classifier(name=None):
++    """Load the configured model. Raises with a clear reason if it can't."""
++    resolved = resolve_model_name(name)
++    model = PATHS.model_file(resolved)
+     if not model.exists():
++        raise FileNotFoundError(
++            f"No trained {resolved} model at {model}. Train it first."
++        )
++    return Classifier(model, PATHS.model_metrics_file(resolved), name=resolved)
++
++
++def default_classifier(name=None):
++    """The configured classifier, or None if that model hasn't been trained."""
++    try:
++        return load_classifier(name)
++    except FileNotFoundError:
+         return None
+-    return Classifier(model, PATHS.model_metrics_file("logistic"))
+ 
+ 
+ def extract(data):
+@@ -357,6 +433,74 @@ def ingest_npz(con, dataset_path, classifier=None, retry_failed=False):
+     return pd.Series(results, dtype="str").value_counts().to_dict()
+ 
+ 
++def stale_prediction_count(con, classifier):
++    """Images whose stored prediction did not come from this classifier."""
++    if classifier is None:
++        return 0
++    return con.execute(
++        """SELECT COUNT(*) FROM images WHERE features IS NOT NULL
++           AND processing_status IN ('complete','awaiting_model')
++           AND (model_version IS NULL OR model_version != ?)""",
++        (classifier.version,),
++    ).fetchone()[0]
++
++
++def rescore_catalog(con, classifier, retry_failed=False, batch_size=2048):
++    """Re-predict stored features with the current model; no files are re-read.
++
++    Only rows whose prediction came from a different model (or none yet) are
++    touched, so this is cheap to run every time and safe to repeat. Rows that
++    failed decoding have no features and are left alone.
++    """
++    statuses = ["complete", "awaiting_model"] + (["model_error"] if retry_failed else [])
++    rows = con.execute(
++        f"""SELECT image_id, features FROM images WHERE features IS NOT NULL
++            AND processing_status IN ({','.join('?' for _ in statuses)})
++            AND (model_version IS NULL OR model_version != ?
++                 OR processing_status != 'complete')""",
++        (*statuses, classifier.version),
++    ).fetchall()
++    counts = {"rescored": 0, "model_error": 0}
++    for i in range(0, len(rows), batch_size):
++        chunk = rows[i : i + batch_size]
++        X = np.stack([np.frombuffer(r["features"], dtype=np.float32) for r in chunk])
++        try:
++            results = classifier.predict_batch(X)
++            errors = [None] * len(chunk)
++        except Exception:
++            # Isolate the bad row(s) instead of failing the whole batch.
++            results, errors = [], []
++            for x in X:
++                try:
++                    results.append(classifier.predict(x))
++                    errors.append(None)
++                except Exception as exc:
++                    results.append(None)
++                    errors.append(f"{type(exc).__name__}: {exc}")
++        stamp = now()
++        with con:
++            for row, result, error in zip(chunk, results, errors):
++                if error is None:
++                    con.execute(
++                        """UPDATE images SET predicted_class=?, confidence=?,
++                           pneumonia_score=?, model_version=?, processing_status='complete',
++                           error=NULL, processed_at=? WHERE image_id=?""",
++                        (result["predicted_class"], result["confidence"],
++                         result["pneumonia_score"], result["model_version"], stamp,
++                         row["image_id"]),
++                    )
++                    counts["rescored"] += 1
++                else:
++                    con.execute(
++                        """UPDATE images SET predicted_class=NULL, confidence=NULL,
++                           pneumonia_score=NULL, model_version=?, processing_status='model_error',
++                           error=?, processed_at=? WHERE image_id=?""",
++                        (classifier.version, error, stamp, row["image_id"]),
++                    )
++                    counts["model_error"] += 1
++    return counts
++
++
+ def catalog(con):
+     return pd.read_sql_query(
+         f"""SELECT s.path,s.filename,COALESCE(s.split,'{EXTERNAL_SPLIT}') split,s.label,i.image_id,i.file_size,
+@@ -378,20 +522,37 @@ def main():
+     source = parser.add_mutually_exclusive_group(required=True)
+     source.add_argument("--directory", type=Path)
+     source.add_argument("--npz", type=Path)
++    source.add_argument(
++        "--rescore",
++        action="store_true",
++        help="re-predict every cataloged image with the current model",
++    )
+     parser.add_argument("--database", type=Path, default=APP_DATABASE)
++    parser.add_argument(
++        "--model",
++        choices=[*MODEL_NAMES, "best"],
++        default=None,
++        help="model to classify with (default: IMAGE_EXPLORER_MODEL or config.toml [app].model)",
++    )
+     parser.add_argument("--retry-failed", action="store_true")
+     parser.add_argument("--metadata-only", action="store_true")
+     args = parser.parse_args()
+-    classifier = None if args.metadata_only else default_classifier()
++    if args.rescore and args.metadata_only:
++        parser.error("--rescore needs a model; drop --metadata-only")
++    classifier = None if args.metadata_only else default_classifier(args.model)
++    if classifier is None and not args.metadata_only:
++        print(f"No trained {resolve_model_name(args.model)} model; cataloging without predictions")
+     con = connect(args.database)
+     try:
+-        runner = ingest_directory if args.directory else ingest_npz
+-        print(
+-            json.dumps(
+-                runner(con, args.directory or args.npz, classifier, args.retry_failed),
+-                indent=2,
+-            )
+-        )
++        if args.rescore:
++            if classifier is None:
++                raise SystemExit("Cannot rescore: the configured model is not trained")
++            result = {"model": classifier.name,
++                      **rescore_catalog(con, classifier, args.retry_failed)}
++        else:
++            runner = ingest_directory if args.directory else ingest_npz
++            result = runner(con, args.directory or args.npz, classifier, args.retry_failed)
++        print(json.dumps(result, indent=2))
+     finally:
+         con.close()
+ 
+diff --git a/src/linear_shap.py b/src/linear_shap.py
+index 789b45f..84a5c5b 100644
+--- a/src/linear_shap.py
++++ b/src/linear_shap.py
+@@ -15,7 +15,7 @@ from sklearn.pipeline import Pipeline
+ from sklearn.preprocessing import StandardScaler
+ from matplotlib.figure import Figure
+ 
+-EXPLANATION_VERSION = "3.0"
++EXPLANATION_VERSION = "3.1"
+ 
+ 
+ @dataclass(frozen=True)
+@@ -183,15 +183,39 @@ def explanation_png(features, explanation):
+ 
+ 
+ def explain_catalog_image(classifier, features, stored_version, stored_score):
+-    """Reject stale predictions rather than overlay a different model's explanation."""
++    """Explain a cataloged image with the model that scored it.
++
++    Logistic regression -> exact linear SHAP; XGBoost -> exact TreeSHAP.
++    The SVM has no exact, fast explainer, so the overlay is unavailable for it.
++    Stale predictions are rejected rather than overlaid with a different
++    model's explanation.
++    """
+     if stored_version != classifier.version:
+         raise ValueError(
+             "Stored prediction uses a different model. Re-ingest this image first."
+         )
+     X = np.frombuffer(features, dtype=np.float32).reshape(1, -1)
+-    explanation = explain_linear(classifier.model, X)
++    model = classifier.model
++    if isinstance(model, Pipeline) and isinstance(
++        model.steps[-1][1], LogisticRegression
++    ):
++        explanation = explain_linear(model, X)
++    else:
++        from tree_shap import explain_tree, is_tree_model
++
++        if not is_tree_model(model):
++            raise ValueError(
++                f"SHAP overlay is not available for the {getattr(classifier, 'name', 'selected')} "
++                "model (no exact, fast explainer). Switch to logistic or xgboost to see it."
++            )
++        explanation = explain_tree(model, X)
++    fresh = (
++        classifier.scores(X)[0]
++        if hasattr(classifier, "scores")
++        else explanation.probability[0]
++    )
+     if not np.isfinite(stored_score) or not np.isclose(
+-        explanation.probability[0], stored_score, rtol=1e-7, atol=1e-8
++        fresh, stored_score, rtol=1e-7, atol=1e-8
+     ):
+         raise ValueError(
+             "Stored prediction differs from current inference. Re-ingest this image first."
+diff --git a/src/model.py b/src/model.py
+index 22c9829..d0a1e43 100644
+--- a/src/model.py
++++ b/src/model.py
+@@ -8,6 +8,7 @@ from pathlib import Path
+ import pandas as pd
+ from loguru import logger
+ from sklearn.linear_model import LogisticRegression
++from sklearn.metrics import roc_auc_score
+ from sklearn.pipeline import Pipeline
+ from sklearn.preprocessing import StandardScaler
+ 
+@@ -22,7 +23,10 @@ from model_utils import (
+     save_evaluation_outputs,
+     save_model,
+     save_model_provenance,
++    save_search_results,
+     select_threshold,
++    tune_and_fit,
++    tuning_metrics,
+ )
+ 
+ 
+@@ -44,14 +48,29 @@ def create_model() -> Pipeline:
+     )
+ 
+ 
++# Tuned exactly like the SVM and XGBoost experiments (same sampler, seed,
++# iteration count and ROC AUC scoring) so the candidates compare like for
++# like. liblinear supports both penalties, and the fitted model stays
++# StandardScaler -> LogisticRegression, so the exact linear SHAP explainer
++# still applies.
++SEARCH_PARAMETERS = {
++    "classifier__C": [0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0],
++    "classifier__penalty": ["l1", "l2"],
++    "classifier__class_weight": [None, "balanced"],
++}
++
++
+ def run_model(
+     dataset_path: Path,
+     output_dir: Path,
++    n_iter: int,
++    use_cv: bool,
++    cv_folds: int,
+     use_mlflow: bool,
+     mlflow_dir: Path,
+     use_augmentation: bool,
+ ) -> None:
+-    """Fit on train, choose threshold on validation, evaluate once on test."""
++    """Tune (holdout or k-fold CV), pick the threshold on validation, test once."""
+ 
+     output_dir.mkdir(parents=True, exist_ok=True)
+ 
+@@ -71,8 +90,6 @@ def run_model(
+     logger.info("Validation data: X={}, y={}", X_val.shape, y_val.shape)
+     logger.info("Test data: X={}, y={}", X_test.shape, y_test.shape)
+ 
+-    model = create_model()
+-
+     with get_mlflow_context(
+         enabled=use_mlflow,
+         tracking_dir=mlflow_dir,
+@@ -82,16 +99,37 @@ def run_model(
+         if active_run is not None:
+             logger.info("MLflow run ID: {}", active_run.info.run_id)
+ 
+-        logger.info("Fitting logistic regression baseline")
+-        model.fit(X_train, y_train)
+-        logger.success("Model training complete")
++        tuning = tune_and_fit(
++            create_model(),
++            SEARCH_PARAMETERS,
++            X_train,
++            y_train,
++            X_val,
++            y_val,
++            n_iter=n_iter,
++            use_cv=use_cv,
++            cv_folds=cv_folds,
++        )
++        logger.success("Logistic regression tuning complete")
++        search_path = save_search_results(
++            tuning.search,
++            output_dir / "model_search_results.csv",
++        )
++        model = tuning.model
+ 
+         validation_scores = model.predict_proba(X_val)[:, 1]
+         threshold, validation_j = select_threshold(y_val, validation_scores)
++        validation_auc = float(roc_auc_score(y_val, validation_scores))
+ 
+         test_scores = model.predict_proba(X_test)[:, 1]
+         metrics, matrix = evaluate_scores(y_test, test_scores, threshold)
+-        metrics["validation_youden_j"] = float(validation_j)
++        metrics.update(
++            {
++                **tuning_metrics(tuning, use_cv),
++                "validation_roc_auc": validation_auc,
++                "validation_youden_j": float(validation_j),
++            }
++        )
+ 
+         output_paths = save_evaluation_outputs(
+             name="model",
+@@ -111,7 +149,7 @@ def run_model(
+             model_path=model_path,
+             mlflow_enabled=use_mlflow,
+         )
+-        output_paths.extend([model_path, provenance_path])
++        output_paths.extend([search_path, model_path, provenance_path])
+ 
+         logger.info(
+             "Final test metrics:\n{}",
+@@ -127,8 +165,13 @@ def run_model(
+                 "solver": "liblinear",
+                 "max_iter": 2000,
+                 "random_state": CONFIG.project.random_seed,
++                "search_iterations": n_iter,
++                "tuning_method": tuning.method,
++                "cv_folds": cv_folds if use_cv else None,
++                "search_metric": "roc_auc",
+                 "threshold_method": "validation_youden_j",
+                 "augmentation_enabled": use_augmentation,
++                **{f"best_{key}": value for key, value in tuning.best_params.items()},
+             },
+             metrics=metrics,
+             artifacts=output_paths,
+@@ -153,6 +196,23 @@ def parse_args() -> argparse.Namespace:
+ 
+     parser.add_argument("--dataset", type=Path, default=PATHS.dataset)
+     parser.add_argument("--output-dir", type=Path, default=PATHS.model_dir("logistic"))
++    parser.add_argument("--n-iter", type=int, default=CONFIG.modeling.search_iterations)
++    parser.add_argument(
++        "--cv",
++        action=argparse.BooleanOptionalAction,
++        default=CONFIG.modeling.cross_validation,
++        help=(
++            "Tune with stratified k-fold CV inside the training split instead of "
++            "the default train -> validation holdout "
++            "(default from config.toml [modeling].cross_validation)"
++        ),
++    )
++    parser.add_argument(
++        "--cv-folds",
++        type=int,
++        default=CONFIG.modeling.cv_folds,
++        help="Number of folds when --cv is on",
++    )
+     parser.add_argument(
+         "--mlflow",
+         action=argparse.BooleanOptionalAction,
+@@ -195,6 +255,9 @@ if __name__ == "__main__":
+         run_model(
+             dataset_path=args.dataset,
+             output_dir=args.output_dir,
++            n_iter=args.n_iter,
++            use_cv=args.cv,
++            cv_folds=args.cv_folds,
+             use_mlflow=args.mlflow,
+             mlflow_dir=args.mlflow_dir,
+             use_augmentation=args.augment,
+diff --git a/src/model_svm.py b/src/model_svm.py
+index b2ae1a4..1b0be65 100644
+--- a/src/model_svm.py
++++ b/src/model_svm.py
+@@ -8,7 +8,6 @@ from pathlib import Path
+ import pandas as pd
+ from loguru import logger
+ from sklearn.metrics import roc_auc_score
+-from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+ from sklearn.pipeline import Pipeline
+ from sklearn.preprocessing import StandardScaler
+ from sklearn.svm import SVC
+@@ -26,11 +25,13 @@ from model_utils import (
+     save_model_provenance,
+     save_search_results,
+     select_threshold,
++    tune_and_fit,
++    tuning_metrics,
+ )
+ 
+ 
+-def create_search(n_iter: int, cv_folds: int) -> RandomizedSearchCV:
+-    """Create a small training-only RBF-SVM hyperparameter search."""
++def create_estimator():
++    """RBF SVM (scaled pixels), searched by tune_and_fit."""
+ 
+     pipeline = Pipeline(
+         steps=[
+@@ -46,36 +47,21 @@ def create_search(n_iter: int, cv_folds: int) -> RandomizedSearchCV:
+         ]
+     )
+ 
+-    parameters = {
+-        "svc__C": [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 25.0],
+-        "svc__gamma": ["scale", 0.0005, 0.001, 0.005, 0.01],
+-        "svc__class_weight": [None, "balanced"],
+-    }
++    return pipeline
+ 
+-    cross_validation = StratifiedKFold(
+-        n_splits=cv_folds,
+-        shuffle=True,
+-        random_state=CONFIG.project.random_seed,
+-    )
+ 
+-    return RandomizedSearchCV(
+-        estimator=pipeline,
+-        param_distributions=parameters,
+-        n_iter=n_iter,
+-        scoring="roc_auc",
+-        cv=cross_validation,
+-        refit=True,
+-        n_jobs=1,
+-        random_state=CONFIG.project.random_seed,
+-        return_train_score=False,
+-        error_score="raise",
+-    )
++SEARCH_PARAMETERS = {
++    "svc__C": [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 25.0],
++    "svc__gamma": ["scale", 0.0005, 0.001, 0.005, 0.01],
++    "svc__class_weight": [None, "balanced"],
++}
+ 
+ 
+ def run_experiment(
+     dataset_path: Path,
+     output_dir: Path,
+     n_iter: int,
++    use_cv: bool,
+     cv_folds: int,
+     use_mlflow: bool,
+     mlflow_dir: Path,
+@@ -95,14 +81,6 @@ def run_experiment(
+         augment_train=use_augmentation,
+     )
+ 
+-    logger.info(
+-        "Training RBF SVM using {} randomized parameter combinations and {}-fold CV",
+-        n_iter,
+-        cv_folds,
+-    )
+-
+-    search = create_search(n_iter=n_iter, cv_folds=cv_folds)
+-
+     with get_mlflow_context(
+         enabled=use_mlflow,
+         tracking_dir=mlflow_dir,
+@@ -112,17 +90,25 @@ def run_experiment(
+         if active_run is not None:
+             logger.info("MLflow run ID: {}", active_run.info.run_id)
+ 
+-        search.fit(X_train, y_train)
+-        logger.success("SVM search complete")
+-        logger.info("Best training CV ROC AUC: {:.4f}", search.best_score_)
+-        logger.info("Best parameters: {}", search.best_params_)
++        tuning = tune_and_fit(
++            create_estimator(),
++            SEARCH_PARAMETERS,
++            X_train,
++            y_train,
++            X_val,
++            y_val,
++            n_iter=n_iter,
++            use_cv=use_cv,
++            cv_folds=cv_folds,
++        )
++        logger.success("SVM tuning complete")
+ 
+         search_path = save_search_results(
+-            search,
++            tuning.search,
+             output_dir / "svm_search_results.csv",
+         )
+ 
+-        model = search.best_estimator_
++        model = tuning.model
+         model_path = save_model(model, output_dir / "model.joblib")
+ 
+         provenance_path = save_model_provenance(
+@@ -139,7 +125,7 @@ def run_experiment(
+         metrics, matrix = evaluate_scores(y_test, test_scores, threshold)
+         metrics.update(
+             {
+-                "training_cv_roc_auc": float(search.best_score_),
++                **tuning_metrics(tuning, use_cv),
+                 "validation_roc_auc": validation_auc,
+                 "validation_youden_j": float(validation_j),
+             }
+@@ -164,11 +150,12 @@ def run_experiment(
+             parameters={
+                 "model": "rbf_svm",
+                 "search_iterations": n_iter,
+-                "cv_folds": cv_folds,
++                "tuning_method": tuning.method,
++                "cv_folds": cv_folds if use_cv else None,
+                 "search_metric": "roc_auc",
+                 "threshold_method": "validation_youden_j",
+                 "augmentation_enabled": use_augmentation,
+-                **{f"best_{key}": value for key, value in search.best_params_.items()},
++                **{f"best_{key}": value for key, value in tuning.best_params.items()},
+             },
+             metrics=metrics,
+             artifacts=output_paths,
+@@ -191,7 +178,22 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--dataset", type=Path, default=PATHS.dataset)
+     parser.add_argument("--output-dir", type=Path, default=PATHS.model_dir("svm"))
+     parser.add_argument("--n-iter", type=int, default=CONFIG.modeling.search_iterations)
+-    parser.add_argument("--cv-folds", type=int, default=CONFIG.modeling.cv_folds)
++    parser.add_argument(
++        "--cv",
++        action=argparse.BooleanOptionalAction,
++        default=CONFIG.modeling.cross_validation,
++        help=(
++            "Tune with stratified k-fold CV inside the training split instead of "
++            "the default train -> validation holdout "
++            "(default from config.toml [modeling].cross_validation)"
++        ),
++    )
++    parser.add_argument(
++        "--cv-folds",
++        type=int,
++        default=CONFIG.modeling.cv_folds,
++        help="Number of folds when --cv is on",
++    )
+     parser.add_argument(
+         "--augment",
+         action="store_true",
+@@ -234,6 +236,7 @@ if __name__ == "__main__":
+             dataset_path=args.dataset,
+             output_dir=args.output_dir,
+             n_iter=args.n_iter,
++            use_cv=args.cv,
+             cv_folds=args.cv_folds,
+             use_mlflow=args.mlflow,
+             mlflow_dir=args.mlflow_dir,
+diff --git a/src/model_utils.py b/src/model_utils.py
+index 56c18cc..2f99604 100644
+--- a/src/model_utils.py
++++ b/src/model_utils.py
+@@ -1,4 +1,5 @@
+ from contextlib import nullcontext
++from dataclasses import dataclass
+ import json
+ from pathlib import Path
+ 
+@@ -21,6 +22,9 @@ from sklearn.metrics import (
+     roc_curve,
+ )
+ 
++from sklearn.base import clone
++from sklearn.model_selection import PredefinedSplit, RandomizedSearchCV, StratifiedKFold
++
+ from data_splits import load_dataset_splits, save_split_manifest
+ from project_config import CONFIG, PATHS
+ from utils import flatten_images
+@@ -85,6 +89,97 @@ def load_model_data(
+     )
+ 
+ 
++@dataclass
++class TuningResult:
++    """Outcome of tune_and_fit. ``model`` is always fit on the training split only."""
++
++    model: object
++    search: RandomizedSearchCV
++    best_params: dict
++    tuning_score: float
++    method: str
++
++
++def tune_and_fit(
++    estimator,
++    parameters: dict,
++    X_train: np.ndarray,
++    y_train: np.ndarray,
++    X_val: np.ndarray,
++    y_val: np.ndarray,
++    *,
++    n_iter: int,
++    use_cv: bool,
++    cv_folds: int,
++    scoring="roc_auc",
++) -> TuningResult:
++    """Randomized hyperparameter search shared by every model script.
++
++    use_cv=False (default): holdout tuning. Each sampled setting is fit on
++    the training split and scored on the validation split.
++    use_cv=True: each setting is scored by seeded, stratified k-fold CV
++    inside the training split; the validation split is not seen.
++
++    Both modes sample the same settings (same seed) and return a model fit
++    on the training split only, so the validation split can still choose
++    the decision threshold and the test split is never touched.
++    """
++
++    seed = CONFIG.project.random_seed
++
++    if use_cv:
++        splitter = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=seed)
++        X_search, y_search, method = X_train, y_train, f"{cv_folds}-fold CV on train"
++    else:
++        # -1 = always in the fitting fold, 0 = the single scoring fold.
++        splitter = PredefinedSplit(
++            np.concatenate([np.full(len(y_train), -1), np.zeros(len(y_val), dtype=int)])
++        )
++        X_search = np.concatenate([X_train, X_val])
++        y_search = np.concatenate([y_train, y_val])
++        method = "holdout (train -> validation)"
++
++    search = RandomizedSearchCV(
++        estimator=estimator,
++        param_distributions=parameters,
++        n_iter=n_iter,
++        scoring=scoring,
++        cv=splitter,
++        # Holdout mode must not refit on train + validation.
++        refit=use_cv,
++        n_jobs=1,
++        random_state=seed,
++        return_train_score=False,
++        error_score="raise",
++    )
++    search.fit(X_search, y_search)
++
++    if use_cv:
++        model = search.best_estimator_
++    else:
++        model = clone(estimator).set_params(**search.best_params_).fit(X_train, y_train)
++
++    logger.info("Tuning: {}; best ROC AUC {:.4f}", method, search.best_score_)
++    logger.info("Best parameters: {}", search.best_params_)
++
++    return TuningResult(
++        model=model,
++        search=search,
++        best_params=dict(search.best_params_),
++        tuning_score=float(search.best_score_),
++        method=method,
++    )
++
++
++def tuning_metrics(result: TuningResult, use_cv: bool) -> dict[str, float]:
++    """Numeric tuning fields for the metrics CSV (also logged to MLflow)."""
++
++    metrics = {"tuning_roc_auc": result.tuning_score}
++    if use_cv:
++        metrics["training_cv_roc_auc"] = result.tuning_score
++    return metrics
++
++
+ def select_threshold(
+     y_true: np.ndarray,
+     scores: np.ndarray,
+diff --git a/src/model_xgboost.py b/src/model_xgboost.py
+index 9f258fd..f092364 100644
+--- a/src/model_xgboost.py
++++ b/src/model_xgboost.py
+@@ -10,7 +10,6 @@ import sklearn
+ import xgboost
+ from loguru import logger
+ from sklearn.metrics import roc_auc_score
+-from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+ from xgboost import XGBClassifier
+ 
+ from logging_utils import configure_logging
+@@ -26,6 +25,8 @@ from model_utils import (
+     save_model_provenance,
+     save_search_results,
+     select_threshold,
++    tune_and_fit,
++    tuning_metrics,
+ )
+ 
+ 
+@@ -36,8 +37,8 @@ def xgboost_roc_auc_scorer(estimator: XGBClassifier, X, y) -> float:
+     return float(roc_auc_score(y, probabilities))
+ 
+ 
+-def create_search(n_iter: int, cv_folds: int) -> RandomizedSearchCV:
+-    """Create a modest CPU-only XGBoost randomized search."""
++def create_estimator():
++    """CPU-only XGBoost classifier, searched by tune_and_fit."""
+ 
+     model = XGBClassifier(
+         objective="binary:logistic",
+@@ -49,39 +50,24 @@ def create_search(n_iter: int, cv_folds: int) -> RandomizedSearchCV:
+         verbosity=0,
+     )
+ 
+-    parameters = {
+-        "n_estimators": [100, 200, 300],
+-        "max_depth": [2, 3, 4, 6],
+-        "learning_rate": [0.03, 0.05, 0.1, 0.2],
+-        "subsample": [0.7, 0.85, 1.0],
+-        "colsample_bytree": [0.7, 0.85, 1.0],
+-        "min_child_weight": [1, 3, 5],
+-    }
+-
+-    cross_validation = StratifiedKFold(
+-        n_splits=cv_folds,
+-        shuffle=True,
+-        random_state=CONFIG.project.random_seed,
+-    )
++    return model
+ 
+-    return RandomizedSearchCV(
+-        estimator=model,
+-        param_distributions=parameters,
+-        n_iter=n_iter,
+-        scoring=xgboost_roc_auc_scorer,
+-        cv=cross_validation,
+-        refit=True,
+-        n_jobs=1,
+-        random_state=CONFIG.project.random_seed,
+-        return_train_score=False,
+-        error_score="raise",
+-    )
++
++SEARCH_PARAMETERS = {
++    "n_estimators": [100, 200, 300],
++    "max_depth": [2, 3, 4, 6],
++    "learning_rate": [0.03, 0.05, 0.1, 0.2],
++    "subsample": [0.7, 0.85, 1.0],
++    "colsample_bytree": [0.7, 0.85, 1.0],
++    "min_child_weight": [1, 3, 5],
++}
+ 
+ 
+ def run_experiment(
+     dataset_path: Path,
+     output_dir: Path,
+     n_iter: int,
++    use_cv: bool,
+     cv_folds: int,
+     use_mlflow: bool,
+     mlflow_dir: Path,
+@@ -105,14 +91,6 @@ def run_experiment(
+         augment_train=use_augmentation,
+     )
+ 
+-    logger.info(
+-        "Training XGBoost using {} randomized parameter combinations and {}-fold CV",
+-        n_iter,
+-        cv_folds,
+-    )
+-
+-    search = create_search(n_iter=n_iter, cv_folds=cv_folds)
+-
+     with get_mlflow_context(
+         enabled=use_mlflow,
+         tracking_dir=mlflow_dir,
+@@ -122,17 +100,26 @@ def run_experiment(
+         if active_run is not None:
+             logger.info("MLflow run ID: {}", active_run.info.run_id)
+ 
+-        search.fit(X_train, y_train)
+-        logger.success("XGBoost hyperparameter search complete")
+-        logger.info("Best training CV ROC AUC: {:.4f}", search.best_score_)
+-        logger.info("Best parameters: {}", search.best_params_)
++        tuning = tune_and_fit(
++            create_estimator(),
++            SEARCH_PARAMETERS,
++            X_train,
++            y_train,
++            X_val,
++            y_val,
++            n_iter=n_iter,
++            use_cv=use_cv,
++            cv_folds=cv_folds,
++            scoring=xgboost_roc_auc_scorer,
++        )
++        logger.success("XGBoost tuning complete")
+ 
+         search_path = save_search_results(
+-            search,
++            tuning.search,
+             output_dir / "xgboost_search_results.csv",
+         )
+ 
+-        model = search.best_estimator_
++        model = tuning.model
+         model_path = save_model(model, output_dir / "model.joblib")
+ 
+         provenance_path = save_model_provenance(
+@@ -149,7 +136,7 @@ def run_experiment(
+         metrics, matrix = evaluate_scores(y_test, test_scores, threshold)
+         metrics.update(
+             {
+-                "training_cv_roc_auc": float(search.best_score_),
++                **tuning_metrics(tuning, use_cv),
+                 "validation_roc_auc": validation_auc,
+                 "validation_youden_j": float(validation_j),
+             }
+@@ -176,14 +163,15 @@ def run_experiment(
+                 "xgboost_version": xgboost.__version__,
+                 "sklearn_version": sklearn.__version__,
+                 "search_iterations": n_iter,
+-                "cv_folds": cv_folds,
++                "tuning_method": tuning.method,
++                "cv_folds": cv_folds if use_cv else None,
+                 "search_metric": "roc_auc",
+                 "scorer": "custom_predict_proba_roc_auc",
+                 "tree_method": "hist",
+                 "device": "cpu",
+                 "threshold_method": "validation_youden_j",
+                 "augmentation_enabled": use_augmentation,
+-                **{f"best_{key}": value for key, value in search.best_params_.items()},
++                **{f"best_{key}": value for key, value in tuning.best_params.items()},
+             },
+             metrics=metrics,
+             artifacts=output_paths,
+@@ -206,7 +194,22 @@ def parse_args() -> argparse.Namespace:
+     parser.add_argument("--dataset", type=Path, default=PATHS.dataset)
+     parser.add_argument("--output-dir", type=Path, default=PATHS.model_dir("xgboost"))
+     parser.add_argument("--n-iter", type=int, default=CONFIG.modeling.search_iterations)
+-    parser.add_argument("--cv-folds", type=int, default=CONFIG.modeling.cv_folds)
++    parser.add_argument(
++        "--cv",
++        action=argparse.BooleanOptionalAction,
++        default=CONFIG.modeling.cross_validation,
++        help=(
++            "Tune with stratified k-fold CV inside the training split instead of "
++            "the default train -> validation holdout "
++            "(default from config.toml [modeling].cross_validation)"
++        ),
++    )
++    parser.add_argument(
++        "--cv-folds",
++        type=int,
++        default=CONFIG.modeling.cv_folds,
++        help="Number of folds when --cv is on",
++    )
+     parser.add_argument(
+         "--augment",
+         action="store_true",
+@@ -251,6 +254,7 @@ if __name__ == "__main__":
+             dataset_path=args.dataset,
+             output_dir=args.output_dir,
+             n_iter=args.n_iter,
++            use_cv=args.cv,
+             cv_folds=args.cv_folds,
+             use_mlflow=args.mlflow,
+             mlflow_dir=args.mlflow_dir,
+diff --git a/src/project_config.py b/src/project_config.py
+index 72857b9..34f63b3 100644
+--- a/src/project_config.py
++++ b/src/project_config.py
+@@ -108,6 +108,7 @@ class QCSettings:
+ 
+ @dataclass(frozen=True)
+ class ModelingSettings:
++    cross_validation: bool
+     cv_folds: int
+     search_iterations: int
+     threshold_method: str
+@@ -147,6 +148,18 @@ class AugmentationSettings:
+     probability: float
+ 
+ 
++MODEL_NAMES = ("logistic", "svm", "xgboost")
++APP_MODEL_CHOICES = (*MODEL_NAMES, "best")
++APP_MODEL_ENV_VAR = "IMAGE_EXPLORER_MODEL"
++
++
++@dataclass(frozen=True)
++class ExplorerSettings:
++    """Which trained model the image catalog and Streamlit app use."""
++
++    model: str
++
++
+ @dataclass(frozen=True)
+ class AppConfig:
+     project: ProjectSettings
+@@ -157,6 +170,22 @@ class AppConfig:
+     mlflow: MLflowSettings
+     shap: ShapSettings
+     augmentation: AugmentationSettings
++    app: ExplorerSettings
++
++
++def _app_model(raw: dict[str, Any]) -> str:
++    """[app].model, overridden by IMAGE_EXPLORER_MODEL. Defaults to logistic."""
++
++    section = raw.get("app", {})
++    if not isinstance(section, dict):
++        raise ValueError("Config section [app] must be a table")
++    value = os.environ.get(APP_MODEL_ENV_VAR) or section.get("model", "logistic")
++    value = str(value).strip().lower()
++    if value not in APP_MODEL_CHOICES:
++        raise ValueError(
++            f"Unknown app model {value!r}; expected one of {', '.join(APP_MODEL_CHOICES)}"
++        )
++    return value
+ 
+ 
+ def _require_section(
+@@ -264,6 +293,7 @@ def load_config(
+             low_variance_quantile=float(qc["low_variance_quantile"]),
+         ),
+         modeling=ModelingSettings(
++            cross_validation=bool(modeling.get("cross_validation", False)),
+             cv_folds=int(modeling["cv_folds"]),
+             search_iterations=int(modeling["search_iterations"]),
+             threshold_method=str(modeling["threshold_method"]),
+@@ -294,6 +324,7 @@ def load_config(
+             contrast_limit=float(augmentation["contrast_limit"]),
+             probability=float(augmentation["probability"]),
+         ),
++        app=ExplorerSettings(model=_app_model(raw)),
+     )
+ 
+ 
+diff --git a/src/run_all.py b/src/run_all.py
+index 64d26e8..0bd7070 100644
+--- a/src/run_all.py
++++ b/src/run_all.py
+@@ -5,13 +5,15 @@ everything:
+ 
+ 1. build the research DuckDB database from the NPZ,
+ 2. run the SQL analysis,
+-3. train the logistic baseline,
++3. train the logistic baseline (plus SVM/XGBoost when config.toml
++   [app].model asks for them, and model selection for "best"),
+ 4. ingest the NPZ into the app catalog,
+-5. start Streamlit.
++5. re-score the catalog if the configured model changed,
++6. start Streamlit.
+ 
+ Steps whose outputs already exist are skipped, so restarting a container that
+ keeps its data (for example with Compose volumes) goes straight to the app.
+-Use ``--force`` to rerun every step, or ``--no-app`` to stop after step 4.
++Use ``--force`` to rerun every step, or ``--no-app`` to stop before the app.
+ 
+ If no dataset is mounted, the pipeline is skipped and the app starts with an
+ empty catalog.
+@@ -29,7 +31,7 @@ from pathlib import Path
+ PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ sys.path.insert(0, str(Path(__file__).resolve().parent))
+ 
+-from project_config import DATASET_ENV_VAR, PATHS  # noqa: E402
++from project_config import CONFIG, DATASET_ENV_VAR, PATHS  # noqa: E402
+ 
+ CATALOG = PATHS.data_dir / "image_catalog.sqlite3"
+ 
+@@ -46,33 +48,36 @@ def run_step(label: str, *args: str) -> None:
+ 
+ 
+ def run_pipeline(dataset: Path, force: bool) -> None:
++    app_model = CONFIG.app.model
+     steps = [
+-        (
+-            "Step 1/4: build database",
+-            PATHS.database,
+-            ["src/build_database.py"],
+-        ),
+-        (
+-            "Step 2/4: SQL analysis",
+-            PATHS.analysis_dir / "unusual_images.png",
+-            ["src/analyze.py"],
+-        ),
+-        (
+-            "Step 3/4: train baseline",
+-            PATHS.model_file("logistic"),
+-            ["src/model.py"],
+-        ),
+-        (
+-            "Step 4/4: ingest images",
+-            CATALOG,
+-            ["src/image_pipeline.py", "--npz", str(dataset)],
+-        ),
++        ("build database", PATHS.database, ["src/build_database.py"]),
++        ("SQL analysis", PATHS.analysis_dir / "unusual_images.png", ["src/analyze.py"]),
++        ("train logistic", PATHS.model_file("logistic"), ["src/model.py"]),
+     ]
+-    for label, output, args in steps:
++    extra = {"svm": ["svm"], "xgboost": ["xgboost"], "best": ["svm", "xgboost"]}
++    for name in extra.get(app_model, []):
++        steps.append((f"train {name}", PATHS.model_file(name), [f"src/model_{name}.py"]))
++    if app_model == "best":
++        steps.append(
++            (
++                "select best model",
++                PATHS.model_selection_dir / "selected_model.json",
++                ["src/select_best_model.py"],
++            )
++        )
++    steps.append(
++        ("ingest images", CATALOG, ["src/image_pipeline.py", "--npz", str(dataset)])
++    )
++    total = len(steps) + 1
++    for number, (label, output, args) in enumerate(steps, start=1):
++        label = f"Step {number}/{total}: {label}"
+         if output.exists() and not force:
+             log(f"{label}: skipped (found {output.relative_to(PROJECT_ROOT)})")
+             continue
+         run_step(label, *args)
++    # Cheap and idempotent: only predictions from a different model are redone.
++    run_step(f"Step {total}/{total}: re-score catalog ({app_model})",
++             "src/image_pipeline.py", "--rescore")
+ 
+ 
+ def main() -> int:
+diff --git a/src/select_best_model.py b/src/select_best_model.py
+index 4784db1..63bcb1f 100644
+--- a/src/select_best_model.py
++++ b/src/select_best_model.py
+@@ -69,6 +69,17 @@ def load_training_cv_auc(
+     return float(metrics.iloc[0]["training_cv_roc_auc"])
+ 
+ 
++def load_metric(metrics_path: Path, column: str) -> float:
++    """One numeric field from a model's metrics CSV, NaN when absent."""
++
++    if not metrics_path.exists():
++        return float("nan")
++    metrics = pd.read_csv(metrics_path)
++    if metrics.empty or column not in metrics.columns:
++        return float("nan")
++    return float(metrics.iloc[0][column])
++
++
+ def prediction_scores(
+     model,
+     model_name: str,
+@@ -134,6 +145,7 @@ def evaluate_candidate(
+         "model_path": str(model_path),
+         "threshold": threshold,
+         "training_cv_roc_auc": load_training_cv_auc(metrics_path),
++        "tuning_roc_auc": load_metric(metrics_path, "tuning_roc_auc"),
+         "validation_roc_auc": validation_auc,
+         "validation_accuracy": threshold_metrics["accuracy"],
+         "validation_balanced_accuracy": threshold_metrics["balanced_accuracy"],
+@@ -235,9 +247,10 @@ def run_selection(
+         "decision_threshold": float(selected["threshold"]),
+         "selection_rule": (
+             "Highest ROC AUC on the held-out validation split. "
+-            "Training-fold cross-validation is used for hyperparameter "
+-            "tuning where applicable; test performance is not used for "
+-            "model selection."
++            "Hyperparameters are tuned on the validation split by default, "
++            "or by k-fold cross-validation inside the training split when "
++            "[modeling].cross_validation is on; test performance is not "
++            "used for model selection."
+         ),
+     }
+ 
+diff --git a/src/tree_shap.py b/src/tree_shap.py
+new file mode 100644
+index 0000000..2ab6abe
+--- /dev/null
++++ b/src/tree_shap.py
+@@ -0,0 +1,61 @@
++"""TreeSHAP for the project's XGBoost model, in the same shape as linear SHAP.
++
++TreeSHAP is exact for tree ensembles. Like the linear explainer, values are
++contributions to class-1 log-odds (XGBoost's raw margin), not probability,
++and base value + sum(values) reproduces the model's margin for each image.
++"""
++
++import numpy as np
++from scipy.special import expit
++
++from linear_shap import LinearExplanation
++
++
++def is_tree_model(model) -> bool:
++    return type(model).__name__ == "XGBClassifier"
++
++
++def tree_shap_values(model, X):
++    """Per-feature TreeSHAP values and base value from XGBoost itself.
++
++    Uses XGBoost's built-in TreeSHAP (``pred_contribs=True``), the same
++    path-dependent algorithm as ``shap.TreeExplainer``. The pinned shap 0.49
++    cannot parse the ``base_score`` that XGBoost 3.x writes into saved models
++    (``could not convert string to float: '[5.19E-1]'``), so going through
++    XGBoost avoids that incompatibility. The last column is the bias term.
++    """
++    import xgboost
++
++    X = np.asarray(X, dtype=np.float32)
++    if X.ndim != 2 or X.shape[1] != model.n_features_in_ or not np.isfinite(X).all():
++        raise ValueError("Expected a finite (N, features) matrix")
++    contributions = (
++        model.get_booster()
++        .predict(xgboost.DMatrix(X), pred_contribs=True)
++        .astype(np.float64)
++    )
++    return contributions[:, :-1], contributions[:, -1]
++
++
++def explain_tree(model, X):
++    X = np.asarray(X, dtype=np.float32)
++    values, bias = tree_shap_values(model, X)
++    probabilities = model.predict_proba(X)[:, 1]
++    margins = np.asarray(model.predict(X, output_margin=True), dtype=np.float64)
++    reconstructed = bias + values.sum(axis=1)
++    residual = reconstructed - margins
++    # Trees are evaluated in float32, so allow float32-sized rounding.
++    if not np.isfinite(residual).all() or np.abs(residual).max() > 1e-3:
++        raise ValueError(
++            f"TreeSHAP additivity failed: maximum log-odds error={np.abs(residual).max():.3g}"
++        )
++    if np.abs(expit(margins) - probabilities).max() > 1e-4:
++        raise ValueError("XGBoost margin does not match its pneumonia probability")
++    return LinearExplanation(
++        values,
++        float(bias[0]),
++        margins,
++        probabilities,
++        residual,
++        "TreeSHAP (path-dependent)",
++    )
+diff --git a/tests/test_model_options.py b/tests/test_model_options.py
+new file mode 100644
+index 0000000..8493d94
+--- /dev/null
++++ b/tests/test_model_options.py
+@@ -0,0 +1,253 @@
++import dataclasses
++import json
++from pathlib import Path
++
++import joblib
++import numpy as np
++import pandas as pd
++import pytest
++from scipy.special import expit
++from sklearn.base import clone
++from sklearn.linear_model import LogisticRegression
++from sklearn.metrics import roc_auc_score
++from sklearn.pipeline import make_pipeline
++from sklearn.preprocessing import StandardScaler
++from sklearn.svm import SVC
++from streamlit.testing.v1 import AppTest
++from xgboost import XGBClassifier
++
++import image_pipeline as pipeline
++import linear_shap
++import project_config
++from model_utils import tune_and_fit, tuning_metrics
++from test_pipeline import png
++
++PARAMS = {
++    "logisticregression__C": [0.01, 0.1, 1.0],
++    "logisticregression__penalty": ["l2"],
++}
++
++
++def data(n=120, features=20, seed=0):
++    rng = np.random.default_rng(seed)
++    X = rng.normal(size=(n, features))
++    y = (X[:, 0] + rng.normal(scale=0.8, size=n) > 0).astype(int)
++    return X, y
++
++
++def save_model(tmp_path, model, threshold, name="model"):
++    model_file = tmp_path / f"{name}.joblib"
++    metrics_file = tmp_path / f"{name}_metrics.csv"
++    joblib.dump(model, model_file)
++    pd.DataFrame([{"threshold": threshold}]).to_csv(metrics_file, index=False)
++    return model_file, metrics_file
++
++
++def pixels(n=40, seed=1):
++    rng = np.random.default_rng(seed)
++    X = rng.integers(0, 256, (n, 784)).astype(np.float32)
++    y = np.array([0, 1] * (n // 2))
++    X[y == 1, :100] += 40  # learnable signal
++    return X, y
++
++
++# ----------------------------------------------------------------------------
++# Tuning: holdout by default, k-fold CV on request
++# ----------------------------------------------------------------------------
++def test_holdout_tuning_scores_on_validation_and_fits_on_train_only():
++    X, y = data()
++    Xtr, ytr, Xva, yva = X[:80], y[:80], X[80:], y[80:]
++    base = make_pipeline(StandardScaler(), LogisticRegression(solver="liblinear"))
++    result = tune_and_fit(
++        base, PARAMS, Xtr, ytr, Xva, yva, n_iter=3, use_cv=False, cv_folds=3
++    )
++    assert result.method.startswith("holdout")
++    assert result.search.n_splits_ == 1
++    # Final model == the same settings fit on train alone (not train + val).
++    assert result.model[0].n_samples_seen_ == 80
++    expected = clone(base).set_params(**result.best_params).fit(Xtr, ytr)
++    np.testing.assert_allclose(
++        result.model.predict_proba(Xva), expected.predict_proba(Xva)
++    )
++    assert result.tuning_score == pytest.approx(
++        roc_auc_score(yva, result.model.predict_proba(Xva)[:, 1])
++    )
++    assert "training_cv_roc_auc" not in tuning_metrics(result, use_cv=False)
++
++
++def test_cv_tuning_uses_k_folds_inside_train():
++    X, y = data()
++    Xtr, ytr, Xva, yva = X[:80], y[:80], X[80:], y[80:]
++    base = make_pipeline(StandardScaler(), LogisticRegression(solver="liblinear"))
++    result = tune_and_fit(
++        base, PARAMS, Xtr, ytr, Xva, yva, n_iter=3, use_cv=True, cv_folds=4
++    )
++    assert result.search.n_splits_ == 4
++    assert result.method == "4-fold CV on train"
++    # refit on train only: the scaler saw exactly the 80 training rows
++    assert result.model[0].n_samples_seen_ == 80
++    assert (
++        tuning_metrics(result, use_cv=True)["training_cv_roc_auc"]
++        == result.tuning_score
++    )
++
++
++def test_cross_validation_is_off_by_default():
++    assert project_config.CONFIG.modeling.cross_validation is False
++
++
++# ----------------------------------------------------------------------------
++# Choosing the app's model
++# ----------------------------------------------------------------------------
++def test_app_model_setting_and_env_override(monkeypatch):
++    monkeypatch.delenv(project_config.APP_MODEL_ENV_VAR, raising=False)
++    assert project_config._app_model({}) == "logistic"
++    assert project_config._app_model({"app": {"model": "SVM"}}) == "svm"
++    monkeypatch.setenv(project_config.APP_MODEL_ENV_VAR, "best")
++    assert project_config._app_model({"app": {"model": "svm"}}) == "best"
++    monkeypatch.setenv(project_config.APP_MODEL_ENV_VAR, "random_forest")
++    with pytest.raises(ValueError, match="Unknown app model"):
++        project_config._app_model({})
++
++
++def test_best_resolves_from_model_selection(tmp_path, monkeypatch):
++    paths = dataclasses.replace(pipeline.PATHS, model_selection_dir=tmp_path)
++    monkeypatch.setattr(pipeline, "PATHS", paths)
++    with pytest.raises(FileNotFoundError, match="select_best_model"):
++        pipeline.resolve_model_name("best")
++    (tmp_path / "selected_model.json").write_text(
++        json.dumps({"selected_model": "xgboost"})
++    )
++    assert pipeline.resolve_model_name("best") == "xgboost"
++    assert pipeline.resolve_model_name("SVM") == "svm"
++    with pytest.raises(ValueError):
++        pipeline.resolve_model_name("forest")
++
++
++def test_margin_model_keeps_its_decisions_on_a_0_1_scale(tmp_path):
++    X, y = pixels()
++    svm = make_pipeline(StandardScaler(), SVC(probability=False)).fit(X, y)
++    raw_threshold = 0.25
++    classifier = pipeline.Classifier(
++        *save_model(tmp_path, svm, raw_threshold), name="svm"
++    )
++    assert classifier.score_kind == "margin"
++    assert classifier.threshold == pytest.approx(expit(raw_threshold))
++    results = classifier.predict_batch(X)
++    margins = svm.decision_function(X)
++    assert [r["predicted_class"] == "pneumonia" for r in results] == list(
++        margins >= raw_threshold
++    )
++    scores = np.array([r["pneumonia_score"] for r in results])
++    np.testing.assert_allclose(scores, expit(margins), rtol=1e-6)
++    assert ((scores >= 0) & (scores <= 1)).all()
++
++
++def test_model_name_is_part_of_the_version(tmp_path):
++    X, y = pixels()
++    model = make_pipeline(StandardScaler(), LogisticRegression()).fit(X, y)
++    files = save_model(tmp_path, model, 0.5)
++    a = pipeline.Classifier(*files, name="logistic")
++    b = pipeline.Classifier(*files, name="other")
++    assert a.version != b.version
++
++
++# ----------------------------------------------------------------------------
++# Re-scoring the catalog after switching models
++# ----------------------------------------------------------------------------
++@pytest.fixture
++def two_classifiers(tmp_path):
++    X, y = pixels()
++    logistic = make_pipeline(StandardScaler(), LogisticRegression()).fit(X, y)
++    xgb = XGBClassifier(n_estimators=5, max_depth=2, random_state=0).fit(X, y)
++    return (
++        pipeline.Classifier(
++            *save_model(tmp_path, logistic, 0.5, "lr"), name="logistic"
++        ),
++        pipeline.Classifier(*save_model(tmp_path, xgb, 0.5, "xgb"), name="xgboost"),
++    )
++
++
++def test_rescore_switches_models_without_reading_files(tmp_path, two_classifiers):
++    logistic, xgb = two_classifiers
++    con = pipeline.connect(tmp_path / "catalog.sqlite3")
++    for i, color in enumerate([10, 90, 200]):
++        pipeline.ingest_bytes(con, png(color), f"{i}.png", f"src{i}", logistic)
++    pipeline.ingest_bytes(con, png(90), "dup.png", "dup", logistic)  # same bytes
++    pipeline.ingest_bytes(con, b"broken", "bad.png", "bad", logistic)
++    assert pipeline.stale_prediction_count(con, xgb) == 3
++
++    assert pipeline.rescore_catalog(con, xgb) == {"rescored": 3, "model_error": 0}
++    assert pipeline.stale_prediction_count(con, xgb) == 0
++    assert pipeline.rescore_catalog(con, xgb) == {"rescored": 0, "model_error": 0}
++
++    rows = con.execute(
++        "SELECT features, pneumonia_score, model_version FROM images "
++        "WHERE processing_status='complete'"
++    ).fetchall()
++    assert {r["model_version"] for r in rows} == {xgb.version}
++    for r in rows:
++        expected = xgb.predict(np.frombuffer(r["features"], dtype=np.float32))
++        assert r["pneumonia_score"] == pytest.approx(expected["pneumonia_score"])
++    failed = con.execute("SELECT processing_status FROM images WHERE features IS NULL")
++    assert {r[0] for r in failed} == {"failed"}
++    con.close()
++
++
++def test_shap_follows_the_active_model(tmp_path, two_classifiers):
++    logistic, xgb = two_classifiers
++    con = pipeline.connect(tmp_path / "catalog.sqlite3")
++    pipeline.ingest_bytes(con, png(120), "a.png", "a", xgb)
++    row = con.execute("SELECT * FROM images").fetchone()
++    X, explanation = linear_shap.explain_catalog_image(
++        xgb, row["features"], row["model_version"], row["pneumonia_score"]
++    )
++    assert explanation.values.shape == (1, 784)
++    assert abs(explanation.residual).max() < 1e-3  # base + sum(phi) == margin
++    with pytest.raises(ValueError, match="different model"):
++        linear_shap.explain_catalog_image(
++            logistic, row["features"], row["model_version"], row["pneumonia_score"]
++        )
++
++    Xs, ys = pixels()
++    svm = make_pipeline(StandardScaler(), SVC()).fit(Xs, ys)
++    svm_classifier = pipeline.Classifier(
++        *save_model(tmp_path, svm, 0.0, "svm"), name="svm"
++    )
++    pipeline.rescore_catalog(con, svm_classifier)
++    row = con.execute("SELECT * FROM images").fetchone()
++    with pytest.raises(ValueError, match="not available for the svm"):
++        linear_shap.explain_catalog_image(
++            svm_classifier,
++            row["features"],
++            row["model_version"],
++            row["pneumonia_score"],
++        )
++    con.close()
++
++
++def test_app_flags_and_rescores_predictions_from_another_model(
++    tmp_path, monkeypatch, two_classifiers
++):
++    logistic, xgb = two_classifiers
++    database = tmp_path / "catalog.sqlite3"
++    con = pipeline.connect(database)
++    pipeline.ingest_bytes(con, png(30), "a.png", "a", logistic)
++    pipeline.ingest_bytes(con, png(220), "b.png", "b", logistic)
++    con.close()
++    monkeypatch.setenv("IMAGE_CATALOG_DB", str(database))
++    monkeypatch.setattr(pipeline, "default_classifier", lambda: xgb)
++    app = AppTest.from_file(
++        str(Path(__file__).resolve().parents[1] / "app.py"), default_timeout=30
++    ).run()
++    assert not app.exception
++    assert any("Classifying with **xgboost**" in c.value for c in app.caption)
++    assert any(
++        "2 images were classified by a different model" in w.value for w in app.warning
++    )
++    next(b for b in app.button if b.label == "Re-score with xgboost").click().run()
++    assert not app.exception
++    assert not any("different model" in w.value for w in app.warning)
++    assert any("Re-scored 2 images with xgboost" in s.value for s in app.success)
++    # SHAP works for the newly active tree model
++    assert not any("SHAP unavailable" in c.value for c in app.caption)

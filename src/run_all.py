@@ -5,13 +5,15 @@ everything:
 
 1. build the research DuckDB database from the NPZ,
 2. run the SQL analysis,
-3. train the logistic baseline,
+3. train the logistic baseline (plus SVM/XGBoost when config.toml
+   [app].model asks for them, and model selection for "best"),
 4. ingest the NPZ into the app catalog,
-5. start Streamlit.
+5. re-score the catalog if the configured model changed,
+6. start Streamlit.
 
 Steps whose outputs already exist are skipped, so restarting a container that
 keeps its data (for example with Compose volumes) goes straight to the app.
-Use ``--force`` to rerun every step, or ``--no-app`` to stop after step 4.
+Use ``--force`` to rerun every step, or ``--no-app`` to stop before the app.
 
 If no dataset is mounted, the pipeline is skipped and the app starts with an
 empty catalog.
@@ -29,7 +31,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from project_config import DATASET_ENV_VAR, PATHS  # noqa: E402
+from project_config import CONFIG, DATASET_ENV_VAR, PATHS  # noqa: E402
 
 CATALOG = PATHS.data_dir / "image_catalog.sqlite3"
 
@@ -46,33 +48,36 @@ def run_step(label: str, *args: str) -> None:
 
 
 def run_pipeline(dataset: Path, force: bool) -> None:
+    app_model = CONFIG.app.model
     steps = [
-        (
-            "Step 1/4: build database",
-            PATHS.database,
-            ["src/build_database.py"],
-        ),
-        (
-            "Step 2/4: SQL analysis",
-            PATHS.analysis_dir / "unusual_images.png",
-            ["src/analyze.py"],
-        ),
-        (
-            "Step 3/4: train baseline",
-            PATHS.model_file("logistic"),
-            ["src/model.py"],
-        ),
-        (
-            "Step 4/4: ingest images",
-            CATALOG,
-            ["src/image_pipeline.py", "--npz", str(dataset)],
-        ),
+        ("build database", PATHS.database, ["src/build_database.py"]),
+        ("SQL analysis", PATHS.analysis_dir / "unusual_images.png", ["src/analyze.py"]),
+        ("train logistic", PATHS.model_file("logistic"), ["src/model.py"]),
     ]
-    for label, output, args in steps:
+    extra = {"svm": ["svm"], "xgboost": ["xgboost"], "best": ["svm", "xgboost"]}
+    for name in extra.get(app_model, []):
+        steps.append((f"train {name}", PATHS.model_file(name), [f"src/model_{name}.py"]))
+    if app_model == "best":
+        steps.append(
+            (
+                "select best model",
+                PATHS.model_selection_dir / "selected_model.json",
+                ["src/select_best_model.py"],
+            )
+        )
+    steps.append(
+        ("ingest images", CATALOG, ["src/image_pipeline.py", "--npz", str(dataset)])
+    )
+    total = len(steps) + 1
+    for number, (label, output, args) in enumerate(steps, start=1):
+        label = f"Step {number}/{total}: {label}"
         if output.exists() and not force:
             log(f"{label}: skipped (found {output.relative_to(PROJECT_ROOT)})")
             continue
         run_step(label, *args)
+    # Cheap and idempotent: only predictions from a different model are redone.
+    run_step(f"Step {total}/{total}: re-score catalog ({app_model})",
+             "src/image_pipeline.py", "--rescore")
 
 
 def main() -> int:
